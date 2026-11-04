@@ -12,6 +12,8 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
+    outputs:
+      release_sha256: ${{ steps.release_binary.outputs.sha256 }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -21,7 +23,8 @@ jobs:
       - run: cargo +stable clippy --locked --all-targets -- -D warnings
       - run: cargo +stable test --locked
       - run: cargo +stable build --release --locked
-      - name: Package Linux x86_64 release
+      - name: Build Linux x86_64 release binary
+        id: release_binary
         if: github.event_name == 'push' && github.ref_type == 'tag'
         shell: bash
         env:
@@ -39,21 +42,16 @@ jobs:
           binary=target/x86_64-unknown-linux-musl/release/serial-tui
           test "$("$binary" --version)" = "serial-tui $version"
 
-          package="serial-tui-$RELEASE_TAG-linux-x86_64"
-          staging="$(mktemp -d)"
-          trap 'rm -rf -- "$staging"' EXIT
-          install -D -m 755 "$binary" "$staging/$package/serial-tui"
-          install -m 644 LICENSE "$staging/$package/LICENSE"
-          mkdir -p target/release-assets
-          tar -C "$staging" -czf "target/release-assets/$package.tar.gz" "$package"
-          cd target/release-assets
-          sha256sum "$package.tar.gz" > "$package.tar.gz.sha256"
-      - name: Store release assets
+          asset=target/release-assets/serial-tui-linux-x86_64
+          install -D -m 755 "$binary" "$asset"
+          checksum="$(sha256sum "$asset")"
+          printf 'sha256=%s\n' "${checksum%% *}" >> "$GITHUB_OUTPUT"
+      - name: Store release binary
         if: github.event_name == 'push' && github.ref_type == 'tag'
         uses: actions/upload-artifact@v7
         with:
-          name: linux-x86_64-release
-          path: target/release-assets/
+          path: target/release-assets/serial-tui-linux-x86_64
+          archive: false
           if-no-files-found: error
 
   release:
@@ -68,17 +66,18 @@ jobs:
     steps:
       - uses: actions/download-artifact@v8
         with:
-          name: linux-x86_64-release
+          name: serial-tui-linux-x86_64
           path: release-assets
       - name: Publish GitHub Release
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_SHA256: ${{ needs.check.outputs.release_sha256 }}
         working-directory: release-assets
         run: |
-          package="serial-tui-$RELEASE_TAG-linux-x86_64"
-          sha256sum --check "$package.tar.gz.sha256"
+          binary=serial-tui-linux-x86_64
+          printf '%s  %s\n' "$RELEASE_SHA256" "$binary" | sha256sum --check --strict
           draft="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft || true)"
           if [[ "$draft" == false ]]; then
             printf 'Release %s is already published.\n' "$RELEASE_TAG"
@@ -92,6 +91,5 @@ jobs:
             gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
               --verify-tag --generate-notes --draft "${prerelease[@]}"
           fi
-          gh release upload "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --clobber \
-            "$package.tar.gz" "$package.tar.gz.sha256"
+          gh release upload "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --clobber "$binary"
           gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false

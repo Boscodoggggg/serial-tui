@@ -8,35 +8,38 @@
 </p>
 
 <p align="center">
-  <kbd>Linux</kbd> &nbsp; <kbd>Rust 1.88+</kbd> &nbsp; <kbd>中文 / English</kbd> &nbsp; <a href="LICENSE"><kbd>MIT</kbd></a>
+  <kbd>🐧 Linux x86_64</kbd> &nbsp; <kbd>⌨️ 纯键盘</kbd> &nbsp; <kbd>🌐 中文 / English</kbd> &nbsp; <a href="LICENSE"><kbd>MIT</kbd></a>
 </p>
 
 <p align="center">
-  <a href="#快速开始">快速开始</a> · <a href="#连接设备">连接设备</a> · <a href="#快捷键">快捷键</a> · <a href="README.md">English</a>
+  <a href="#快速开始">⬇️ 快速开始</a> · <a href="#连接设备">🔌 连接设备</a> · <a href="#快捷键">⌨️ 快捷键</a> · <a href="README.md">English</a>
 </p>
 
-## 终端界面
+## 终端实录
 
-![Serial TUI 在 Linux 上启动后的界面，展示连接设备前的串口设置、日志和发送区。](docs/assets/terminal.png)
+![中文串口调测台实录，展示波特率选择和收发、仅接收、仅发送三种模式。](docs/assets/terminal-zh.gif)
+
+画面录自 Linux 发布版，演示连接设备前的串口设置和模式切换。
 
 ## 快速开始
 
-在装有 Rust 1.88 或更新版本的 Linux 环境中，从项目目录运行。
+下载 [Linux x86_64 可执行文件](https://github.com/Boscodoggggg/serial-tui/releases/latest/download/serial-tui-linux-x86_64)，在终端里直接运行。
 
 ```sh
-cargo run --release --locked -- --lang zh
+curl -fL https://github.com/Boscodoggggg/serial-tui/releases/latest/download/serial-tui-linux-x86_64 -o serial-tui
+chmod +x ./serial-tui
+./serial-tui --lang zh
 ```
 
-把串口适配器接到 Linux 机器上。在「串口」一栏按 `Enter` 选择设备，按设备要求设置参数，再选「连接」。连接成功后，可以在发送框输入设备支持的指令。
+按 `F6` 切换中英文，按 `Ctrl+Q` 退出。
 
 ## 连接设备
 
 ```sh
-cargo build --release --locked
-./target/release/serial-tui --port /dev/ttyUSB0 --baud 115200 --lang zh
+./serial-tui --port /dev/ttyUSB0 --baud 115200 --lang zh
 ```
 
-1. 按 `F2` 进入串口设置，用方向键和 `Enter` 配置设备、波特率、数据位、停止位、校验位和流控。
+1. 插上串口适配器，把上面的设备路径和波特率换成实际值。按 `F2` 进入设置，用方向键和 `Enter` 可以调整串口、波特率、数据位、停止位、校验位和流控。
 2. 选择「连接」打开串口。修改已连接设备的参数后，选「应用 / 重连」。设备未出现在列表里时，可选择「输入设备路径」。
 3. 按 `F3` 选择收发模式。需要发送时，用 `Tab` 切到发送框，输入内容后按 `Enter`。
 

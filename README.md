@@ -8,35 +8,38 @@
 </p>
 
 <p align="center">
-  <kbd>Linux</kbd> &nbsp; <kbd>Rust 1.88+</kbd> &nbsp; <kbd>English / 中文</kbd> &nbsp; <a href="LICENSE"><kbd>MIT</kbd></a>
+  <kbd>🐧 Linux x86_64</kbd> &nbsp; <kbd>⌨️ Keyboard only</kbd> &nbsp; <kbd>🌐 English / 中文</kbd> &nbsp; <a href="LICENSE"><kbd>MIT</kbd></a>
 </p>
 
 <p align="center">
-  <a href="#quick-start">Quick start</a> · <a href="#connect-a-device">Connect a device</a> · <a href="#keyboard-reference">Keys</a> · <a href="README.zh-CN.md">简体中文</a>
+  <a href="#quick-start">⬇️ Quick start</a> · <a href="#connect-a-device">🔌 Connect a device</a> · <a href="#keyboard-reference">⌨️ Keys</a> · <a href="README.zh-CN.md">简体中文</a>
 </p>
 
-## Terminal
+## Terminal walkthrough
 
-![Serial TUI running on Linux, with the serial settings, log, and send panes visible before a device is connected.](docs/assets/terminal.png)
+![English Serial TUI walkthrough showing baud rate selection and the Duplex, Receive only, and Send only modes.](docs/assets/terminal-en.gif)
+
+Recorded from the Linux release binary. The walkthrough covers serial settings and mode switching before a device is connected.
 
 ## Quick start
 
-With Rust 1.88 or newer on Linux, run this from the project directory.
+Download the [Linux x86_64 executable](https://github.com/Boscodoggggg/serial-tui/releases/latest/download/serial-tui-linux-x86_64) and run it from a terminal.
 
 ```sh
-cargo run --release --locked -- --lang en
+curl -fL https://github.com/Boscodoggggg/serial-tui/releases/latest/download/serial-tui-linux-x86_64 -o serial-tui
+chmod +x ./serial-tui
+./serial-tui --lang en
 ```
 
-Plug the adapter into the Linux machine, then press `Enter` in the port field to select a device. Set the parameters to match the device and select **Connect**. The send input is ready for your command once the connection opens.
+Use `F6` to switch the interface language and `Ctrl+Q` to exit.
 
 ## Connect a device
 
 ```sh
-cargo build --release --locked
-./target/release/serial-tui --port /dev/ttyUSB0 --baud 115200
+./serial-tui --port /dev/ttyUSB0 --baud 115200 --lang en
 ```
 
-1. Press `F2` to focus serial settings. Use the arrow keys and `Enter` to set the port, baud rate, data bits, stop bits, parity, and flow control.
+1. Plug in the adapter and replace the device path and baud rate above with the values for your device. Press `F2` and use the arrow keys and `Enter` to adjust the port, baud rate, data bits, stop bits, parity, and flow control.
 2. Select **Connect** to open the device. Use **Apply / Reconnect** after changing an open port's settings. If the device is missing from the list, choose **Enter device path…**.
 3. Press `F3` to pick a work mode. In a mode that can send, use `Tab` to reach the send input and `Enter` to transmit.
 
