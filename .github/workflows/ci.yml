@@ -1,7 +1,9 @@
-name: Linux CI
+name: Linux CI and Release
 
 on:
   push:
+    branches: ['**']
+    tags: ['v*']
   pull_request:
 
 permissions:
@@ -19,3 +21,77 @@ jobs:
       - run: cargo +stable clippy --locked --all-targets -- -D warnings
       - run: cargo +stable test --locked
       - run: cargo +stable build --release --locked
+      - name: Package Linux x86_64 release
+        if: github.event_name == 'push' && github.ref_type == 'tag'
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          version="$(cargo +stable metadata --locked --no-deps --format-version 1 |
+            python3 -c 'import json, sys; print(json.load(sys.stdin)["packages"][0]["version"])')"
+          if [[ "$RELEASE_TAG" != "v$version" ]]; then
+            printf 'Release tag %s must match Cargo.toml version v%s.\n' "$RELEASE_TAG" "$version" >&2
+            exit 1
+          fi
+
+          rustup target add --toolchain stable x86_64-unknown-linux-musl
+          cargo +stable build --release --locked --target x86_64-unknown-linux-musl
+          binary=target/x86_64-unknown-linux-musl/release/serial-tui
+          test "$("$binary" --version)" = "serial-tui $version"
+
+          package="serial-tui-$RELEASE_TAG-linux-x86_64"
+          staging="$(mktemp -d)"
+          trap 'rm -rf -- "$staging"' EXIT
+          install -D -m 755 "$binary" "$staging/$package/serial-tui"
+          install -m 644 LICENSE "$staging/$package/LICENSE"
+          mkdir -p target/release-assets
+          tar -C "$staging" -czf "target/release-assets/$package.tar.gz" "$package"
+          cd target/release-assets
+          sha256sum "$package.tar.gz" > "$package.tar.gz.sha256"
+      - name: Store release assets
+        if: github.event_name == 'push' && github.ref_type == 'tag'
+        uses: actions/upload-artifact@v7
+        with:
+          name: linux-x86_64-release
+          path: target/release-assets/
+          if-no-files-found: error
+
+  release:
+    needs: check
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: release-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: linux-x86_64-release
+          path: release-assets
+      - name: Publish GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        working-directory: release-assets
+        run: |
+          package="serial-tui-$RELEASE_TAG-linux-x86_64"
+          sha256sum --check "$package.tar.gz.sha256"
+          draft="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft || true)"
+          if [[ "$draft" == false ]]; then
+            printf 'Release %s is already published.\n' "$RELEASE_TAG"
+            exit 0
+          fi
+          if [[ "$draft" != true ]]; then
+            prerelease=()
+            if [[ "${RELEASE_TAG%%+*}" == *-* ]]; then
+              prerelease+=(--prerelease)
+            fi
+            gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+              --verify-tag --generate-notes --draft "${prerelease[@]}"
+          fi
+          gh release upload "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --clobber \
+            "$package.tar.gz" "$package.tar.gz.sha256"
+          gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false
