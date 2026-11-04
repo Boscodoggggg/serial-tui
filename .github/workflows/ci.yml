@@ -12,8 +12,6 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
-    outputs:
-      release_sha256: ${{ steps.release_binary.outputs.sha256 }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -23,12 +21,40 @@ jobs:
       - run: cargo +stable clippy --locked --all-targets -- -D warnings
       - run: cargo +stable test --locked
       - run: cargo +stable build --release --locked
-      - name: Build Linux x86_64 release binary
-        id: release_binary
-        if: github.event_name == 'push' && github.ref_type == 'tag'
+
+  build-release:
+    needs: check
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            target: x86_64-unknown-linux-musl
+            emulator: ''
+          - arch: aarch64
+            target: aarch64-unknown-linux-musl
+            emulator: qemu-aarch64
+          - arch: armv7
+            target: armv7-unknown-linux-musleabihf
+            emulator: qemu-arm
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Install ARM emulator
+        if: matrix.emulator != ''
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-user
+      - name: Build and smoke-test release binary
         shell: bash
         env:
           RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_ARCH: ${{ matrix.arch }}
+          RUST_TARGET: ${{ matrix.target }}
+          EMULATOR: ${{ matrix.emulator }}
         run: |
           version="$(cargo +stable metadata --locked --no-deps --format-version 1 |
             python3 -c 'import json, sys; print(json.load(sys.stdin)["packages"][0]["version"])')"
@@ -37,25 +63,25 @@ jobs:
             exit 1
           fi
 
-          rustup target add --toolchain stable x86_64-unknown-linux-musl
-          cargo +stable build --release --locked --target x86_64-unknown-linux-musl
-          binary=target/x86_64-unknown-linux-musl/release/serial-tui
-          test "$("$binary" --version)" = "serial-tui $version"
-
-          asset=target/release-assets/serial-tui-linux-x86_64
-          install -D -m 755 "$binary" "$asset"
-          checksum="$(sha256sum "$asset")"
-          printf 'sha256=%s\n' "${checksum%% *}" >> "$GITHUB_OUTPUT"
+          rustup toolchain install stable --profile minimal --target "$RUST_TARGET"
+          cargo +stable build --release --locked --target "$RUST_TARGET" \
+            --config "target.$RUST_TARGET.linker=\"rust-lld\""
+          binary="target/$RUST_TARGET/release/serial-tui"
+          runner=()
+          if [[ -n "$EMULATOR" ]]; then
+            runner+=("$EMULATOR")
+          fi
+          test "$("${runner[@]}" "$binary" --version)" = "serial-tui $version"
+          install -D -m 755 "$binary" "target/release-assets/serial-tui-linux-$RELEASE_ARCH"
       - name: Store release binary
-        if: github.event_name == 'push' && github.ref_type == 'tag'
         uses: actions/upload-artifact@v7
         with:
-          path: target/release-assets/serial-tui-linux-x86_64
+          path: target/release-assets/serial-tui-linux-${{ matrix.arch }}
           archive: false
           if-no-files-found: error
 
   release:
-    needs: check
+    needs: build-release
     if: github.event_name == 'push' && github.ref_type == 'tag'
     runs-on: ubuntu-latest
     permissions:
@@ -66,18 +92,21 @@ jobs:
     steps:
       - uses: actions/download-artifact@v8
         with:
-          name: serial-tui-linux-x86_64
+          pattern: serial-tui-linux-*
+          merge-multiple: true
+          digest-mismatch: error
           path: release-assets
       - name: Publish GitHub Release
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.ref_name }}
-          RELEASE_SHA256: ${{ needs.check.outputs.release_sha256 }}
         working-directory: release-assets
         run: |
-          binary=serial-tui-linux-x86_64
-          printf '%s  %s\n' "$RELEASE_SHA256" "$binary" | sha256sum --check --strict
+          binaries=(serial-tui-linux-x86_64 serial-tui-linux-aarch64 serial-tui-linux-armv7)
+          for binary in "${binaries[@]}"; do
+            test -s "$binary"
+          done
           draft="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft || true)"
           if [[ "$draft" == false ]]; then
             printf 'Release %s is already published.\n' "$RELEASE_TAG"
@@ -91,5 +120,5 @@ jobs:
             gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
               --verify-tag --generate-notes --draft "${prerelease[@]}"
           fi
-          gh release upload "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --clobber "$binary"
+          gh release upload "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --clobber "${binaries[@]}"
           gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false

@@ -8,7 +8,7 @@
 </p>
 
 <p align="center">
-  <kbd>🐧 Linux x86_64</kbd> &nbsp; <kbd>⌨️ 纯键盘</kbd> &nbsp; <kbd>🌐 中文 / English</kbd> &nbsp; <a href="LICENSE"><kbd>MIT</kbd></a>
+  <kbd>🐧 Linux · x86_64 / ARM64 / ARMv7</kbd> &nbsp; <kbd>⌨️ 纯键盘</kbd> &nbsp; <kbd>🌐 中文 / English</kbd> &nbsp; <a href="LICENSE"><kbd>MIT</kbd></a>
 </p>
 
 <p align="center">
@@ -23,10 +23,18 @@
 
 ## 快速开始
 
-下载 [Linux x86_64 可执行文件](https://github.com/Boscodoggggg/serial-tui/releases/latest/download/serial-tui-linux-x86_64)，在终端里直接运行。
+在要运行程序的 Linux 机器上执行 `uname -m`，按输出选择可执行文件。
+
+| `uname -m` | 下载 |
+| --- | --- |
+| `x86_64` | [Linux x86_64](https://github.com/Boscodoggggg/serial-tui/releases/latest/download/serial-tui-linux-x86_64) |
+| `aarch64` | [Linux ARM64](https://github.com/Boscodoggggg/serial-tui/releases/latest/download/serial-tui-linux-aarch64) |
+| `armv7l` 或 `armv8l` | [Linux ARMv7（32 位，硬浮点）](https://github.com/Boscodoggggg/serial-tui/releases/latest/download/serial-tui-linux-armv7) |
+
+ARM64 板卡可以直接运行下面的命令。其他架构请换成表中对应的下载地址。
 
 ```sh
-curl -fL https://github.com/Boscodoggggg/serial-tui/releases/latest/download/serial-tui-linux-x86_64 -o serial-tui
+curl -fL https://github.com/Boscodoggggg/serial-tui/releases/latest/download/serial-tui-linux-aarch64 -o serial-tui
 chmod +x ./serial-tui
 ./serial-tui --lang zh
 ```

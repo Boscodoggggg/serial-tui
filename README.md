@@ -8,7 +8,7 @@
 </p>
 
 <p align="center">
-  <kbd>🐧 Linux x86_64</kbd> &nbsp; <kbd>⌨️ Keyboard only</kbd> &nbsp; <kbd>🌐 English / 中文</kbd> &nbsp; <a href="LICENSE"><kbd>MIT</kbd></a>
+  <kbd>🐧 Linux · x86_64 / ARM64 / ARMv7</kbd> &nbsp; <kbd>⌨️ Keyboard only</kbd> &nbsp; <kbd>🌐 English / 中文</kbd> &nbsp; <a href="LICENSE"><kbd>MIT</kbd></a>
 </p>
 
 <p align="center">
@@ -23,10 +23,18 @@ Recorded from the Linux release binary. The walkthrough covers serial settings a
 
 ## Quick start
 
-Download the [Linux x86_64 executable](https://github.com/Boscodoggggg/serial-tui/releases/latest/download/serial-tui-linux-x86_64) and run it from a terminal.
+Run `uname -m` on the Linux machine and choose the matching executable.
+
+| `uname -m` | Download |
+| --- | --- |
+| `x86_64` | [Linux x86_64](https://github.com/Boscodoggggg/serial-tui/releases/latest/download/serial-tui-linux-x86_64) |
+| `aarch64` | [Linux ARM64](https://github.com/Boscodoggggg/serial-tui/releases/latest/download/serial-tui-linux-aarch64) |
+| `armv7l` or `armv8l` | [Linux ARMv7 (32-bit, hard float)](https://github.com/Boscodoggggg/serial-tui/releases/latest/download/serial-tui-linux-armv7) |
+
+On an ARM64 board, download and run it as follows. For other architectures, use the matching download URL from the table.
 
 ```sh
-curl -fL https://github.com/Boscodoggggg/serial-tui/releases/latest/download/serial-tui-linux-x86_64 -o serial-tui
+curl -fL https://github.com/Boscodoggggg/serial-tui/releases/latest/download/serial-tui-linux-aarch64 -o serial-tui
 chmod +x ./serial-tui
 ./serial-tui --lang en
 ```
