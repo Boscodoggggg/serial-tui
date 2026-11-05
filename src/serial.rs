@@ -76,7 +76,11 @@ pub enum Command {
     Scan,
     Open(Settings),
     Close,
-    Write(Vec<u8>, usize),
+    Write {
+        data: Vec<u8>,
+        session_epoch: usize,
+        repeat_epoch: Option<usize>,
+    },
 }
 
 pub enum Event {
@@ -96,6 +100,14 @@ struct Control {
     stop: AtomicBool,
     discard_rx: AtomicBool,
     tx_epoch: AtomicUsize,
+    repeat_epoch: AtomicUsize,
+}
+
+impl Control {
+    fn allows_write(&self, session_epoch: usize, repeat_epoch: Option<usize>) -> bool {
+        session_epoch == self.tx_epoch.load(SeqCst)
+            && repeat_epoch.is_none_or(|epoch| epoch == self.repeat_epoch.load(SeqCst))
+    }
 }
 
 pub struct Worker {
@@ -133,12 +145,20 @@ impl Worker {
             })
     }
 
-    pub fn write(&self, bytes: Vec<u8>) -> Result<(), &'static str> {
-        self.enqueue(Command::Write(bytes, self.control.tx_epoch.load(SeqCst)))
+    pub fn write(&self, data: Vec<u8>, repeat: bool) -> Result<(), &'static str> {
+        self.enqueue(Command::Write {
+            data,
+            session_epoch: self.control.tx_epoch.load(SeqCst),
+            repeat_epoch: repeat.then(|| self.control.repeat_epoch.load(SeqCst)),
+        })
     }
 
     pub fn invalidate_writes(&self) {
         self.control.tx_epoch.fetch_add(1, SeqCst);
+    }
+
+    pub fn cancel_repeat_writes(&self) {
+        self.control.repeat_epoch.fetch_add(1, SeqCst);
     }
 
     pub fn discard_rx(&self, discard: bool) {
@@ -217,9 +237,19 @@ fn run(
                 drop(port.take());
                 events.send(Event::Closed)?;
             }
-            Some(Command::Write(data, epoch)) if epoch == control.tx_epoch.load(SeqCst) => {
+            Some(Command::Write {
+                data,
+                session_epoch,
+                repeat_epoch,
+            }) => {
                 if let Some(endpoint) = &mut port {
-                    let (count, error) = write_packet(endpoint.as_mut(), &data, epoch, control);
+                    let (count, error) = write_packet(
+                        endpoint.as_mut(),
+                        &data,
+                        session_epoch,
+                        repeat_epoch,
+                        control,
+                    );
                     if count > 0 {
                         events.send(Event::Tx(data[..count].to_vec()))?;
                     }
@@ -266,13 +296,19 @@ fn run(
 }
 
 fn write_packet(
-    port: &mut dyn SerialPort,
+    port: &mut (impl io::Write + ?Sized),
     data: &[u8],
-    epoch: usize,
+    session_epoch: usize,
+    repeat_epoch: Option<usize>,
     control: &Control,
 ) -> (usize, Option<io::Error>) {
     let mut count = 0;
-    while count < data.len() && epoch == control.tx_epoch.load(SeqCst) {
+    while count < data.len() {
+        // Finish a frame that has already started unless the serial session changes.
+        let queued_repeat = if count == 0 { repeat_epoch } else { None };
+        if !control.allows_write(session_epoch, queued_repeat) {
+            break;
+        }
         match port.write(&data[count..]) {
             Ok(0) => return (count, Some(io::ErrorKind::WriteZero.into())),
             Ok(size) => count += size,
@@ -281,4 +317,45 @@ fn write_packet(
         }
     }
     (count, None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stopping_repeat_skips_queued_repeat_frames_but_keeps_manual_sends() {
+        let (commands, queued) = mpsc::sync_channel(4);
+        let worker = Worker {
+            commands,
+            events: None,
+            control: Arc::new(Control::default()),
+            thread: None,
+        };
+        worker.write(b"old repeat".to_vec(), true).unwrap();
+        worker.write(b"manual".to_vec(), false).unwrap();
+        worker.cancel_repeat_writes();
+        worker.write(b"new repeat".to_vec(), true).unwrap();
+
+        let mut device = Vec::new();
+        for _ in 0..3 {
+            let Command::Write {
+                data,
+                session_epoch,
+                repeat_epoch,
+            } = queued.try_recv().unwrap()
+            else {
+                panic!("expected a write command");
+            };
+            let (_, error) = write_packet(
+                &mut device,
+                &data,
+                session_epoch,
+                repeat_epoch,
+                &worker.control,
+            );
+            assert!(error.is_none());
+        }
+        assert_eq!(device, b"manualnew repeat");
+    }
 }

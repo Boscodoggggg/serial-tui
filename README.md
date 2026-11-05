@@ -73,7 +73,7 @@ Run the app on the Linux machine the adapter is plugged into. If access is denie
 | `↑` / `↓` · `Enter` · `Ctrl+U` in send input | Recall history, send, or clear the input |
 | `Esc` / `Ctrl+Q` | Dismiss the current dialog / quit |
 
-Pausing freezes the view while the app continues to receive. The log keeps the latest 2,000 records in memory. Press `Enter` on the active repeat option to stop repeating.
+Pausing keeps the current log view available while the app continues to receive. The live log retains the latest 2,000 records. Press `Enter` on the active repeat option to stop repeating and cancel queued repeat frames.
 
 ## License
 

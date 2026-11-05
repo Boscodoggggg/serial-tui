@@ -229,10 +229,10 @@ fn draw_log(frame: &mut Frame, app: &App, area: Rect) {
     );
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    let follow = app.lang.text(if app.log.anchor.is_none() {
-        "following"
-    } else {
+    let follow = app.lang.text(if app.log.is_paused() {
         "paused"
+    } else {
+        "following"
     });
     let counters = format!("RX {} B / TX {} B", app.log.rx, app.log.tx);
     let [format_area, count_area] = Layout::horizontal([

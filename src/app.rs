@@ -317,6 +317,7 @@ impl Direction {
     }
 }
 
+#[derive(Clone)]
 pub struct LogEntry {
     pub id: u64,
     pub time: DateTime<Local>,
@@ -382,10 +383,15 @@ fn hex(bytes: &[u8]) -> String {
     output
 }
 
+struct PausedLog {
+    entries: VecDeque<LogEntry>,
+    anchor: u64,
+}
+
 pub struct Log {
     entries: VecDeque<LogEntry>,
     sequence: u64,
-    pub anchor: Option<u64>,
+    paused: Option<PausedLog>,
     pub horizontal: usize,
     pub rx: u64,
     pub tx: u64,
@@ -396,7 +402,7 @@ impl Default for Log {
         Self {
             entries: VecDeque::new(),
             sequence: 1,
-            anchor: None,
+            paused: None,
             horizontal: 0,
             rx: 0,
             tx: 0,
@@ -431,17 +437,19 @@ impl Log {
     fn receive(&mut self, bytes: &[u8]) {
         self.rx += bytes.len() as u64;
         for mut line in bytes.split_inclusive(|byte| *byte == b'\n') {
-            if let Some(previous) = self.entries.back_mut().filter(|entry| {
-                entry.direction == Direction::Rx
-                    && !entry.data.ends_with(b"\n")
-                    && self.anchor.is_none_or(|anchor| entry.id > anchor)
-            }) {
-                let take = line.len().min(512 - previous.data.len());
+            if let Some(previous) = self
+                .entries
+                .back_mut()
+                .filter(|entry| entry.direction == Direction::Rx && !entry.data.ends_with(b"\n"))
+            {
+                let take = rx_prefix_len(line, previous.data.len());
                 previous.data.extend_from_slice(&line[..take]);
                 line = &line[take..];
             }
-            for chunk in line.chunks(512) {
+            while !line.is_empty() {
+                let (chunk, rest) = line.split_at(rx_prefix_len(line, 0));
                 self.push(Direction::Rx, chunk.to_vec(), None);
+                line = rest;
             }
         }
     }
@@ -452,7 +460,9 @@ impl Log {
     }
 
     fn filtered(&self, mode: Mode) -> Vec<&LogEntry> {
-        self.entries
+        self.paused
+            .as_ref()
+            .map_or(&self.entries, |paused| &paused.entries)
             .iter()
             .filter(|entry| match entry.direction {
                 Direction::System => true,
@@ -463,8 +473,8 @@ impl Log {
     }
 
     fn end(&self, entries: &[&LogEntry]) -> usize {
-        self.anchor.map_or(entries.len(), |id| {
-            entries.partition_point(|entry| entry.id <= id)
+        self.paused.as_ref().map_or(entries.len(), |paused| {
+            entries.partition_point(|entry| entry.id <= paused.anchor)
         })
     }
 
@@ -480,19 +490,39 @@ impl Log {
             .end(&entries)
             .saturating_add_signed(delta)
             .clamp(height.min(entries.len()), entries.len());
-        self.anchor = if end == entries.len() && delta > 0 {
-            None
+        if end == entries.len() && delta > 0 {
+            self.follow();
         } else {
-            Some(end.checked_sub(1).map_or(0, |index| entries[index].id))
-        };
+            let anchor = end.checked_sub(1).map_or(0, |index| entries[index].id);
+            self.pause_at(anchor);
+        }
     }
 
     fn toggle_follow(&mut self) {
-        self.anchor = if self.anchor.is_some() {
-            None
+        if self.is_paused() {
+            self.follow();
         } else {
-            Some(self.sequence - 1)
-        };
+            self.pause_at(self.sequence - 1);
+        }
+    }
+
+    fn pause_at(&mut self, anchor: u64) {
+        if let Some(paused) = &mut self.paused {
+            paused.anchor = anchor;
+        } else {
+            self.paused = Some(PausedLog {
+                entries: self.entries.clone(),
+                anchor,
+            });
+        }
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.paused.is_some()
+    }
+
+    fn follow(&mut self) {
+        self.paused = None;
     }
 
     fn export(&self, path: &str, lang: Language) -> std::io::Result<()> {
@@ -509,6 +539,17 @@ impl Log {
         }
         writer.flush()
     }
+}
+
+fn rx_prefix_len(bytes: &[u8], used: usize) -> usize {
+    const RECORD_BYTES: usize = 512;
+    let mut end = bytes.len().min(RECORD_BYTES.saturating_sub(used));
+    // Allow a UTF-8 scalar that straddles the boundary to finish in this record.
+    let max = bytes.len().min((RECORD_BYTES + 3).saturating_sub(used));
+    while end < max && bytes[end] & 0b1100_0000 == 0b1000_0000 {
+        end += 1;
+    }
+    end
 }
 
 #[derive(Clone)]
@@ -659,7 +700,7 @@ impl App {
             self.activate_setting();
             return;
         }
-        self.repeat = None;
+        self.stop_repeat();
         self.worker.invalidate_writes();
         self.pending = self.enqueue(Command::Open(self.draft.clone()));
     }
@@ -668,7 +709,7 @@ impl App {
         if self.pending || self.active.is_none() {
             return;
         }
-        self.repeat = None;
+        self.stop_repeat();
         self.worker.invalidate_writes();
         self.pending = self.enqueue(Command::Close);
     }
@@ -884,7 +925,7 @@ impl App {
                 ],
                 0,
             ),
-            3 if self.repeat.is_some() => self.repeat = None,
+            3 if self.repeat.is_some() => self.stop_repeat(),
             3 => self.menu(
                 "repeat",
                 [500, 1000, 2000]
@@ -1036,7 +1077,7 @@ impl App {
                 return;
             }
         };
-        if let Err(key) = self.worker.write(bytes.clone()) {
+        if let Err(key) = self.worker.write(bytes.clone(), interval.is_some()) {
             self.notice(key, String::new());
             return;
         }
@@ -1055,6 +1096,12 @@ impl App {
         }
     }
 
+    fn stop_repeat(&mut self) {
+        if self.repeat.take().is_some() {
+            self.worker.cancel_repeat_writes();
+        }
+    }
+
     fn switch_mode(&mut self) {
         self.mode = match self.mode {
             Mode::Both => Mode::Rx,
@@ -1063,7 +1110,7 @@ impl App {
         };
         self.worker.discard_rx(self.mode == Mode::Tx);
         if self.mode == Mode::Rx {
-            self.repeat = None;
+            self.stop_repeat();
             self.worker.invalidate_writes();
             if matches!(self.pane, Pane::Options | Pane::Input) {
                 self.pane = Pane::Log;
@@ -1134,7 +1181,7 @@ impl App {
                         self.log.scroll(self.mode, log_height, log_height as isize)
                     }
                     KeyCode::Home => self.log.scroll(self.mode, log_height, isize::MIN),
-                    KeyCode::End => self.log.anchor = None,
+                    KeyCode::End => self.log.follow(),
                     KeyCode::Left => self.log.horizontal = self.log.horizontal.saturating_sub(8),
                     KeyCode::Right => self.log.horizontal = (self.log.horizontal + 8).min(5000),
                     KeyCode::Char('h' | 'H') => {
@@ -1183,7 +1230,7 @@ impl App {
                     self.worker.events = None;
                     self.active = None;
                     self.pending = false;
-                    self.repeat = None;
+                    self.stop_repeat();
                     self.notice("worker_down", String::new());
                     changed = true;
                     break;
@@ -1195,8 +1242,8 @@ impl App {
         let now = Instant::now();
         if let Some(repeat) = self.repeat.as_mut().filter(|repeat| now >= repeat.next) {
             repeat.next = now + repeat.interval;
-            if let Err(key) = self.worker.write(repeat.bytes.clone()) {
-                self.repeat = None;
+            if let Err(key) = self.worker.write(repeat.bytes.clone(), true) {
+                self.stop_repeat();
                 self.notice(key, String::new());
                 changed = true;
             }
@@ -1229,13 +1276,13 @@ impl App {
             }
             Event::Lost(error) => {
                 self.active = None;
-                self.repeat = None;
+                self.stop_repeat();
                 self.log.system("lost", error.clone());
                 self.notice("lost", error);
             }
             Event::ScanFailed(error) => self.notice("scan_failed", error),
             Event::WriteFailed(error) => {
-                self.repeat = None;
+                self.stop_repeat();
                 self.log.system("write_failed", error.clone());
                 self.notice("write_failed", error);
             }
@@ -1277,6 +1324,35 @@ mod tests {
     }
 
     #[test]
+    fn receive_preserves_utf8_at_the_record_boundary_across_reads() {
+        for character in ['串', '🦀'] {
+            let mut bytes = vec![b'A'; 511];
+            bytes.extend_from_slice(format!("{character}尾\n").as_bytes());
+            for split in 511..=515 {
+                let mut log = Log::default();
+                log.receive(&bytes[..split]);
+                log.receive(&bytes[split..]);
+                let rows = log.visible(Mode::Rx, 10);
+                assert!(
+                    rows.iter()
+                        .all(|row| std::str::from_utf8(&row.data).is_ok())
+                );
+                assert!(
+                    rows[0]
+                        .body(Language::Zh, Format::Text)
+                        .ends_with(character)
+                );
+                assert_eq!(
+                    rows.iter()
+                        .flat_map(|row| row.data.iter().copied())
+                        .collect::<Vec<_>>(),
+                    bytes
+                );
+            }
+        }
+    }
+
+    #[test]
     fn paused_log_keeps_capturing_bytes_without_mutating_its_visible_rows() {
         let mut log = Log::default();
         log.receive(b"before");
@@ -1286,6 +1362,21 @@ mod tests {
         assert_eq!(log.visible(Mode::Rx, 10)[0].data, b"before");
         assert_eq!(log.visible(Mode::Rx, 10).len(), 1);
         log.toggle_follow();
-        assert_eq!(log.visible(Mode::Rx, 10)[1].data, b"after\n");
+        assert_eq!(log.visible(Mode::Rx, 10)[0].data, b"beforeafter\n");
+    }
+
+    #[test]
+    fn paused_rows_remain_visible_after_the_live_buffer_wraps() {
+        let mut log = Log::default();
+        log.receive(b"first\nlast visible\n");
+        log.toggle_follow();
+        log.receive(&b"new\n".repeat(2100));
+        assert_eq!(log.visible(Mode::Rx, 1)[0].data, b"last visible\n");
+        assert_eq!(log.entries.len(), 2000);
+
+        log.scroll(Mode::Rx, 1, -1);
+        assert_eq!(log.visible(Mode::Rx, 1)[0].data, b"first\n");
+        log.follow();
+        assert_eq!(log.visible(Mode::Rx, 1)[0].data, b"new\n");
     }
 }
