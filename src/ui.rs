@@ -7,7 +7,10 @@ use ratatui::{
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::{App, Direction, Editor, Modal, Mode, Pane, clean_text};
+use crate::{
+    app::{App, Direction, Editor, Modal, Mode, Pane, PortMenu, clean_text},
+    serial::{PortKind, same_device},
+};
 
 const BACKGROUND: Color = Color::Rgb(16, 22, 29);
 const PANEL: Color = Color::Rgb(19, 28, 36);
@@ -175,7 +178,7 @@ fn draw_settings(frame: &mut Frame, app: &App, area: Rect) {
     let block = panel(app.lang.text("settings"), focused, PANEL);
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    let rows = app.settings_rows();
+    let rows = app.settings_rows(inner.width < 23);
     let label_column = rows[..6]
         .iter()
         .map(|(label, _)| label.width())
@@ -243,7 +246,11 @@ fn draw_log(frame: &mut Frame, app: &App, area: Rect) {
         Constraint::Length(counters.len() as u16),
     ])
     .areas(Rect::new(inner.x, inner.y, inner.width, 1));
-    let format = format!("{} · {follow}", app.lang.text(app.display.label()));
+    let mut format = format!("{} · {follow}", app.lang.text(app.display.label()));
+    if let Some(search) = app.search_label() {
+        format.push_str(" · ");
+        format.push_str(&search);
+    }
     frame.render_widget(Line::styled(format, Style::new().fg(DIM)), format_area);
     frame.render_widget(Line::styled(counters, Style::new().fg(DIM)), count_area);
 
@@ -263,7 +270,7 @@ fn draw_log(frame: &mut Frame, app: &App, area: Rect) {
             Direction::Tx => AMBER,
         };
         let body = entry.body(app.lang, app.display);
-        let line = Line::from(vec![
+        let mut spans = vec![
             Span::styled(
                 entry.time.format("%H:%M:%S%.3f").to_string(),
                 Style::new().fg(DIM),
@@ -274,24 +281,45 @@ fn draw_log(frame: &mut Frame, app: &App, area: Rect) {
                 Style::new().fg(color).bold(),
             ),
             Span::raw(" "),
-            Span::raw(pan(&body, app.log.horizontal)),
-        ]);
+        ];
+        let visible = pan(&body, app.log.horizontal);
+        let offset = body.len() - visible.len();
+        let hit = app.search_highlight(entry).and_then(|range| {
+            let start = range.start.max(offset);
+            Some((
+                body.get(offset..start)?,
+                body.get(start..range.end)?,
+                body.get(range.end..)?,
+            ))
+        });
+        if let Some((before, matched, after)) = hit {
+            spans.extend([
+                Span::raw(before),
+                Span::styled(matched, FOCUS),
+                Span::raw(after),
+            ]);
+        } else {
+            spans.push(Span::raw(visible));
+        }
         frame.render_widget(
-            line,
+            Line::from(spans),
             Rect::new(inner.x, inner.y + 1 + index as u16, inner.width, 1),
         );
     }
 }
 
 fn draw_send(frame: &mut Frame, app: &App, area: Rect) {
-    let block = panel(
+    let mut block = panel(
         app.lang.text("send"),
         matches!(app.pane, Pane::Options | Pane::Input),
         BACKGROUND,
     );
+    if let Some(hint) = app.send_hint() {
+        block = block.title_bottom(Line::styled(format!(" {hint} "), Style::new().fg(MINT)));
+    }
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    let options = app.options_rows();
+    let options = app.options_rows(inner.width < 36);
     let first = options[..2]
         .iter()
         .enumerate()
@@ -366,16 +394,25 @@ fn draw_editor(frame: &mut Frame, editor: &Editor, hint: &str, area: Rect, focus
 
 fn draw_keys(frame: &mut Frame, app: &App, areas: &Areas) {
     let t = |key| app.lang.text(key);
-    let mut local = vec![("Tab/⇧Tab", t("switch"))];
+    let mut local = vec![("Tab/⇧Tab", app.lang.pick("Pane", t("switch")))];
     match app.pane {
         Pane::Settings => local.extend([("↑↓", t("select")), ("Enter", t("edit"))]),
         Pane::Log => {
-            local.extend([
-                ("PgUp/Dn", t("page")),
-                ("←→", t("pan")),
-                ("End", t("latest")),
-                ("H", t("view")),
-            ]);
+            local.push(("/", t("search")));
+            if app.search_label().is_some() {
+                local.extend([
+                    ("n/N", t("search_jump")),
+                    ("Esc", t("search_clear")),
+                    ("End", t("latest")),
+                ]);
+            } else {
+                local.extend([
+                    ("PgUp/Dn", t("page")),
+                    ("←→", t("pan")),
+                    ("End", t("latest")),
+                    ("H", t("view")),
+                ]);
+            }
         }
         Pane::Options => local.extend([("←→", t("select")), ("Enter", t("edit"))]),
         Pane::Input => local.extend([
@@ -435,10 +472,16 @@ fn key_line<'a>(keys: Vec<(&'a str, &'a str)>, bg: Color) -> Line<'a> {
 
 fn draw_modal(frame: &mut Frame, app: &App, modal: &Modal, screen: Rect, notice: &str) {
     let (title, desired_height) = match modal {
+        Modal::Ports(menu) => return draw_port_menu(frame, app, menu, screen),
         Modal::Menu(menu) => (menu.title, menu.labels().count().min(12) as u16 + 3),
         Modal::Edit(field, _) => (field.label(), 5),
+        Modal::Search(_) => ("search_log", 6),
     };
-    let width = screen.width.min(55);
+    let width = screen.width.min(if matches!(modal, Modal::Search(_)) {
+        61
+    } else {
+        55
+    });
     let height = (screen.height - 2).min(desired_height);
     let area = Rect::new(
         screen.x + (screen.width - width) / 2,
@@ -451,6 +494,7 @@ fn draw_modal(frame: &mut Frame, app: &App, modal: &Modal, screen: Rect, notice:
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let help = match modal {
+        Modal::Ports(_) => unreachable!(),
         Modal::Menu(menu) => {
             let capacity = inner.height.saturating_sub(1) as usize;
             let offset = menu.selected.saturating_sub(capacity.saturating_sub(1));
@@ -497,10 +541,203 @@ fn draw_modal(frame: &mut Frame, app: &App, modal: &Modal, screen: Rect, notice:
                 ("^U", app.lang.pick("Clear", "清空")),
             ]
         }
+        Modal::Search(search) => {
+            let t = |key| app.lang.text(key);
+            let format = if search.hex { "HEX" } else { t("text") };
+            let scope = if search.rx_only {
+                "search_rx"
+            } else {
+                "search_all"
+            };
+            frame.render_widget(
+                Line::styled(format!("{format} · {}", t(scope)), Style::new().fg(DIM)),
+                Rect::new(inner.x, inner.y, inner.width, 1),
+            );
+            draw_editor(
+                frame,
+                &search.editor,
+                "",
+                Rect::new(inner.x, inner.y + 1, inner.width, 1),
+                true,
+            );
+            frame.render_widget(
+                Line::styled(notice, Style::new().fg(AMBER)),
+                Rect::new(inner.x, inner.y + 2, inner.width, 1),
+            );
+            vec![
+                ("Tab", app.lang.pick("Text/HEX", "文本/HEX")),
+                ("F3", t("search_scope")),
+                ("Enter", t("confirm")),
+                ("Esc", t("cancel")),
+            ]
+        }
     };
     frame.render_widget(
         key_line(help, PANEL),
         Rect::new(inner.x, inner.bottom() - 1, inner.width, 1),
+    );
+}
+
+struct PortPopup {
+    area: Rect,
+    page: usize,
+    path_lines: Vec<String>,
+}
+
+impl PortPopup {
+    fn new(screen: Rect, menu: &PortMenu) -> Self {
+        // Two borders, a position row, and two shortcut rows.
+        const FRAME_ROWS: u16 = 5;
+        let width = screen.width.saturating_sub(4).min(76);
+        let available = screen.height.saturating_sub(2).saturating_sub(FRAME_ROWS);
+        let detail_limit = usize::from(available.saturating_sub(1));
+        let mut path_lines = vec![String::new()];
+        if let Some(path) = menu.selected_path() {
+            let width = usize::from(width.saturating_sub(4)).max(2);
+            let mut used = 0;
+            for ch in clean_text(path.into()).chars() {
+                let char_width = ch.width().unwrap_or(0);
+                if used + char_width > width {
+                    path_lines.push(String::new());
+                    used = 0;
+                }
+                path_lines.last_mut().unwrap().push(ch);
+                used += char_width;
+            }
+            if path_lines.len() > detail_limit && detail_limit > 0 {
+                path_lines.truncate(detail_limit);
+                let last = path_lines.last_mut().unwrap();
+                *last = truncate(&format!("{last}…"), width);
+            }
+        }
+        path_lines.truncate(detail_limit);
+        let page = (menu.manual_index() + 1)
+            .min(12)
+            .min(usize::from(available).saturating_sub(path_lines.len()))
+            .max(1);
+        let height = (FRAME_ROWS + (page + path_lines.len()) as u16).min(screen.height);
+        Self {
+            area: Rect::new(
+                screen.x + (screen.width - width) / 2,
+                screen.y + (screen.height - height) / 2,
+                width,
+                height,
+            ),
+            page,
+            path_lines,
+        }
+    }
+}
+
+pub fn port_page_size(screen: Rect, app: &App) -> usize {
+    match &app.modal {
+        Some(Modal::Ports(menu)) => PortPopup::new(screen, menu).page,
+        _ => 1,
+    }
+}
+
+fn draw_port_menu(frame: &mut Frame, app: &App, menu: &PortMenu, screen: Rect) {
+    let popup = PortPopup::new(screen, menu);
+    let t = |key| app.lang.text(key);
+    let count = menu.ports.len();
+    let units = app
+        .lang
+        .pick(if count == 1 { "device" } else { "devices" }, "个设备");
+    let title = format!("{} · {count} {units}", t("port"));
+    frame.render_widget(Clear, popup.area);
+    let block = panel(&title, true, PANEL);
+    let inner = block.inner(popup.area);
+    frame.render_widget(block, popup.area);
+    let row = |offset| Rect::new(inner.x, inner.y + offset, inner.width, 1);
+    let active = app.active.as_ref().map(|active| active.port.as_str());
+    let visible = menu.visible(popup.page);
+    for (offset, index) in visible.clone().enumerate() {
+        let (label, kind, connected) = if let Some(port) = menu.ports.get(index) {
+            let kind = match port.kind {
+                PortKind::Usb => t("usb_port"),
+                PortKind::OnboardUart => t("uart_port"),
+                PortKind::Pci => t("pci_port"),
+                PortKind::Bluetooth => t("bluetooth_port"),
+                PortKind::Unknown => "",
+            };
+            (
+                clean_text(port.node.clone()),
+                kind,
+                active.is_some_and(|path| port.matches(path)),
+            )
+        } else if index < menu.manual_index() {
+            let path = menu.configured.as_deref().unwrap_or_default();
+            (
+                clean_text(path.into()),
+                t("configured_port"),
+                active.is_some_and(|active| same_device(active, path)),
+            )
+        } else {
+            (t("manual_port").into(), "", false)
+        };
+        let kind = match (kind, connected) {
+            ("", true) => t("current_port").into(),
+            (kind, true) => format!("{kind} · {}", t("current_port")),
+            (kind, false) => kind.into(),
+        };
+        let selected = index == menu.selected;
+        let prefix = if selected { "› " } else { "  " };
+        let width = usize::from(inner.width).saturating_sub(prefix.width());
+        let line = if kind.is_empty() {
+            format!("{prefix}{}", truncate(&label, width))
+        } else {
+            let name_width = width.saturating_sub(kind.width() + 2);
+            let name = truncate(&label, name_width);
+            let padding = " ".repeat(name_width.saturating_sub(name.width()));
+            format!("{prefix}{name}{padding}  {kind}")
+        };
+        let style = if selected {
+            FOCUS
+        } else {
+            Style::new().fg(TEXT)
+        };
+        frame.render_widget(Line::styled(line, style), row(offset as u16));
+    }
+
+    let mut footer = popup.page as u16;
+    let up = if visible.start > 0 { "↑" } else { " " };
+    let down = if visible.end <= menu.manual_index() {
+        "↓"
+    } else {
+        " "
+    };
+    let position = if menu.selected < count {
+        (menu.selected + 1).to_string()
+    } else {
+        "—".into()
+    };
+    let status = format!(
+        "{up} {position} / {count} {down}  {}",
+        app.port_scan_message()
+    );
+    frame.render_widget(Line::styled(status, Style::new().fg(MINT)), row(footer));
+    footer += 1;
+    for path in popup.path_lines {
+        frame.render_widget(Line::styled(path, Style::new().fg(DIM)), row(footer));
+        footer += 1;
+    }
+    frame.render_widget(
+        key_line(
+            vec![
+                ("↑↓", t("select")),
+                ("PgUp/PgDn", t("page")),
+                ("Enter", t("confirm")),
+            ],
+            PANEL,
+        ),
+        row(footer),
+    );
+    frame.render_widget(
+        key_line(
+            vec![("F5", t("refresh")), ("F6", "中/EN"), ("Esc", t("cancel"))],
+            PANEL,
+        ),
+        row(footer + 1),
     );
 }
 

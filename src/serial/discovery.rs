@@ -1,15 +1,26 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fs,
     ops::RangeInclusive,
     os::unix::fs::{FileTypeExt, MetadataExt},
     path::{Path, PathBuf},
 };
 
-pub(super) fn scan(ports: Vec<String>) -> Vec<String> {
+use super::{PortInfo, PortKind};
+
+pub(super) fn scan(ports: Vec<serialport::SerialPortInfo>) -> Vec<PortInfo> {
     let drivers = fs::read_to_string("/proc/tty/drivers").unwrap_or_default();
+    let known = ports
+        .into_iter()
+        .map(|port| {
+            (
+                PathBuf::from(port.port_name),
+                PortKind::from_serialport(&port.port_type),
+            )
+        })
+        .collect();
     collect_ports(
-        ports.into_iter().map(PathBuf::from),
+        &known,
         Path::new("/dev"),
         Path::new("/sys/class/tty"),
         &drivers,
@@ -22,16 +33,16 @@ pub(super) fn device_id(path: &Path) -> Option<u64> {
 }
 
 fn collect_ports(
-    known: impl Iterator<Item = PathBuf>,
+    known: &HashMap<PathBuf, PortKind>,
     dev: &Path,
     tty_class: &Path,
     drivers: &str,
-) -> Vec<String> {
+) -> Vec<PortInfo> {
     let ranges: Vec<_> = drivers.lines().filter_map(serial_range).collect();
     let onboard = entries(tty_class)
         .filter(|entry| is_serial_tty(&entry.path(), &ranges))
         .map(|entry| dev.join(entry.file_name()));
-    let mut nodes: Vec<_> = known.chain(onboard).collect();
+    let mut nodes: Vec<_> = known.keys().cloned().chain(onboard).collect();
     nodes.sort_unstable();
 
     // Prefer a stable device identifier, then a physical connector, then the kernel name.
@@ -47,13 +58,44 @@ fn collect_ports(
         .filter_map(|path| {
             let target = path.canonicalize().ok()?;
             let id = device_id(&target)?;
-            if uart_type(&tty_class.join(target.file_name()?)) == Some(0) {
+            let tty = tty_class.join(target.file_name()?);
+            if uart_type(&tty) == Some(0) {
                 return None;
             }
+            let kind = known.get(&target).copied().unwrap_or(PortKind::Unknown);
             let path = path.into_os_string().into_string().ok()?;
-            seen.insert(id).then_some(path)
+            seen.insert(id).then(|| PortInfo {
+                node: target.to_str().unwrap_or(&path).into(),
+                path,
+                kind: if kind == PortKind::Unknown {
+                    sysfs_kind(&tty, &ranges)
+                } else {
+                    kind
+                },
+            })
         })
         .collect()
+}
+
+fn sysfs_kind(tty: &Path, ranges: &[(u32, RangeInclusive<u32>)]) -> PortKind {
+    let Ok(device) = tty.canonicalize() else {
+        return PortKind::Unknown;
+    };
+    for ancestor in device.ancestors() {
+        let Ok(subsystem) = fs::read_link(ancestor.join("subsystem")) else {
+            continue;
+        };
+        match subsystem.file_name().and_then(|name| name.to_str()) {
+            Some("usb" | "usb-serial") => return PortKind::Usb,
+            Some("pci") => return PortKind::Pci,
+            Some("platform" | "amba") if is_serial_tty(tty, ranges) => {
+                return PortKind::OnboardUart;
+            }
+            Some("i2c" | "spi") => break,
+            _ => {}
+        }
+    }
+    PortKind::Unknown
 }
 
 fn entries(path: &Path) -> impl Iterator<Item = fs::DirEntry> {
@@ -139,9 +181,10 @@ mod tests {
                        usbserial /dev/ttyUSB 188 0 serial\n\
                        acm /dev/ttyACM 166 0-255 serial";
 
-        let ports = collect_ports([dev.join("ttyUSB0")].into_iter(), &dev, &tty_class, drivers);
+        let known = HashMap::from([(dev.join("ttyUSB0"), PortKind::Usb)]);
+        let ports = collect_ports(&known, &dev, &tty_class, drivers);
         assert_eq!(
-            ports,
+            ports.into_iter().map(|port| port.path).collect::<Vec<_>>(),
             [
                 by_id.join("usb-adapter"),
                 by_path.join("acm-connector"),

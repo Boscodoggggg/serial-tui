@@ -113,12 +113,11 @@ fn run(terminal: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
                         && !matches!(key.code, KeyCode::Enter | KeyCode::F(_))) =>
             {
                 let size = terminal.size()?;
+                let screen = ratatui::layout::Rect::new(0, 0, size.width, size.height);
                 if app.key(
                     key,
-                    ui::log_height(
-                        ratatui::layout::Rect::new(0, 0, size.width, size.height),
-                        app.mode,
-                    ),
+                    ui::log_height(screen, app.mode),
+                    ui::port_page_size(screen, app),
                 ) {
                     return Ok(());
                 }

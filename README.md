@@ -48,12 +48,12 @@ Use `F6` to switch the interface language and `Ctrl+Q` to exit.
 ```
 
 1. Plug in the adapter and replace the device path and baud rate above with the values for your device. Press `F2` and use the arrow keys and `Enter` to adjust the port, baud rate, data bits, stop bits, parity, and flow control.
-2. Select **Connect** to open the device. Use **Apply / Reconnect** after changing an open port's settings. If the device is missing from the list, choose **Enter device path…**.
+2. After you confirm a port in the picker, the settings highlight moves to **Connect** or **Apply / Reconnect**. Press `Enter` to open the port, or move up to adjust its settings first. If the device is missing from the list, choose **Enter device path…**.
 3. Press `F3` to pick a work mode. In a mode that can send, use `Tab` to reach the send input and `Enter` to transmit.
 
 Run the app on the Linux machine the adapter is plugged into. If access is denied, check the device node with `ls -l /dev/ttyUSB0` and use an account that can open it. Use an 80×24 terminal or larger for more room to read the log.
 
-**Refresh ports** lists USB adapters and onboard UARTs using Linux device information. Each device appears once, preferring a stable `by-id` or `by-path` link when one exists. Choose **Connect** to check that the device can be opened.
+**Refresh ports** lists USB adapters and onboard UARTs using Linux device information. Each device appears once, preferring a stable `by-id` or `by-path` link when one exists. In the port picker, use `PgUp` / `PgDn` to page through the list and `F5` to refresh it in place. The selected device stays highlighted if it is still present. Choose **Connect** to check that the device can be opened.
 
 The app remembers the last successful connection in `$XDG_STATE_HOME/serial-tui/last-connection.json` (default: `~/.local/state/serial-tui/last-connection.json`). `--port` and `--baud` override the saved values for that launch. Select **Connect** to open the device. If applying new settings fails, the app keeps the previous connection or attempts to reopen it with its previous settings.
 
@@ -74,11 +74,15 @@ The app remembers the last successful connection in `$XDG_STATE_HOME/serial-tui/
 | `Tab` / `Shift+Tab` | Move between settings, log, send options, and send input |
 | `PgUp` / `PgDn` · `←` / `→` · `End` | Page through the log, pan across long lines, or return to the latest entry |
 | `H` in the log | Cycle Text, HEX, and HEX + ASCII |
+| `/`, `n` / `N` in the log | Find in buffered records and jump to the next or previous match |
 | `←` / `→` and `Enter` in send options | Set text or HEX input, line endings, presets, or repeat interval |
+| `F7` / `F10` | Open built-in presets / choose a repeat interval or stop repeating |
 | `↑` / `↓` · `Enter` · `Ctrl+U` in send input | Recall history, send, or clear the input |
 | `Esc` / `Ctrl+Q` | Dismiss the current dialog / quit |
 
-Pausing keeps the current log view available while the app continues to receive. The live log retains the latest 2,000 records. Press `Enter` on the active repeat option to stop repeating and cancel queued repeat frames.
+Pausing keeps the current log view available while the app continues to receive. The live log retains the latest 2,000 records. In the search dialog, press `Tab` to switch between text and HEX and `F3` to search RX only. Search matches within individual records in the current buffer or paused snapshot. Press `Esc` in the log to clear the search or `End` to follow live records.
+
+`F7` fills the send input from a built-in preset. To repeat a command, connect to a port, fill the send input, then press `F10` and choose an interval. Press `F10` again or press `Enter` on the repeat option to stop and cancel queued repeat frames.
 
 For long sessions, press `F9`, enter a new filename, and confirm. The file records timestamps, direction, and HEX bytes while the view is paused or the on-screen log rolls over. Recording follows the selected work mode. Use **Duplex** to capture both directions. Press `F9` again to finish and flush the file.
 

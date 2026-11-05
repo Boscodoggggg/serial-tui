@@ -87,18 +87,113 @@ pub enum Command {
     },
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum PortKind {
+    Usb,
+    OnboardUart,
+    Pci,
+    Bluetooth,
+    Unknown,
+}
+
+impl PortKind {
+    fn from_serialport(kind: &serialport::SerialPortType) -> Self {
+        match kind {
+            serialport::SerialPortType::UsbPort(_) => Self::Usb,
+            serialport::SerialPortType::PciPort => Self::Pci,
+            serialport::SerialPortType::BluetoothPort => Self::Bluetooth,
+            serialport::SerialPortType::Unknown => Self::Unknown,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct PortInfo {
+    pub path: String,
+    pub node: String,
+    pub kind: PortKind,
+}
+
+impl PortInfo {
+    pub fn matches(&self, path: &str) -> bool {
+        self.node == path || same_device(&self.path, path)
+    }
+
+    pub fn matches_previous(&self, previous: &Self) -> bool {
+        const BY_ID: &str = "/dev/serial/by-id/";
+        if self.path == previous.path {
+            return true;
+        }
+        if self.path.starts_with(BY_ID) && previous.path.starts_with(BY_ID) {
+            return false;
+        }
+        self.node == previous.node || self.matches(&previous.path)
+    }
+}
+
+pub enum PortFailureKind {
+    Permission,
+    Busy,
+    Missing,
+    Settings,
+    Disconnected,
+    Other,
+}
+
+pub struct PortFailure {
+    pub path: String,
+    pub kind: PortFailureKind,
+    pub detail: String,
+}
+
+impl PortFailure {
+    fn opening(path: String, error: serialport::Error) -> Self {
+        use io::ErrorKind as Io;
+        use serialport::ErrorKind as Serial;
+
+        let kind = match (error.kind(), error.description.as_str()) {
+            (Serial::Io(Io::PermissionDenied), _) | (_, "Operation not permitted") => {
+                PortFailureKind::Permission
+            }
+            (Serial::Io(Io::NotFound), _) | (_, "No such device" | "No such device or address") => {
+                PortFailureKind::Missing
+            }
+            (Serial::Io(Io::ResourceBusy | Io::WouldBlock), _)
+            | (_, "Device or resource busy" | "Unable to acquire exclusive lock on serial port") => {
+                PortFailureKind::Busy
+            }
+            (Serial::InvalidInput | Serial::Io(Io::InvalidInput), _)
+            | (_, "Invalid argument" | "Settings did not apply correctly") => {
+                PortFailureKind::Settings
+            }
+            // Some platforms use NoDevice for both missing and busy devices.
+            (Serial::NoDevice, _)
+                if std::fs::metadata(&path).is_err_and(|error| error.kind() == Io::NotFound) =>
+            {
+                PortFailureKind::Missing
+            }
+            _ => PortFailureKind::Other,
+        };
+        Self {
+            path,
+            kind,
+            detail: error.description,
+        }
+    }
+}
+
 pub enum Event {
-    Ports(Vec<String>),
+    Ports(Vec<PortInfo>),
     Opened(Settings),
     Closed,
     OpenFailed {
-        error: String,
+        error: PortFailure,
         retained: Option<Settings>,
-        restore_error: Option<String>,
+        restore_error: Option<Box<PortFailure>>,
     },
     ScanFailed(String),
     WriteFailed(String),
-    Lost(String),
+    Lost(PortFailure),
     Rx(Vec<u8>),
     Tx(Vec<u8>),
 }
@@ -205,6 +300,28 @@ struct Connection {
     settings: Settings,
 }
 
+impl Connection {
+    fn lost(self, error: io::Error) -> Event {
+        use io::ErrorKind as Io;
+
+        let path = self.settings.port;
+        let disconnected = matches!(
+            error.kind(),
+            Io::NotFound | Io::NotConnected | Io::BrokenPipe | Io::UnexpectedEof
+        ) || std::fs::metadata(&path)
+            .is_err_and(|error| error.kind() == Io::NotFound);
+        Event::Lost(PortFailure {
+            path,
+            kind: if disconnected {
+                PortFailureKind::Disconnected
+            } else {
+                PortFailureKind::Other
+            },
+            detail: error.to_string(),
+        })
+    }
+}
+
 pub fn same_device(left: &str, right: &str) -> bool {
     if left == right {
         return true;
@@ -248,11 +365,13 @@ fn change_connection(connection: &mut Option<Connection>, settings: Settings) ->
                             settings: previous,
                         });
                     }
-                    Err(error) => restore_error = Some(error.to_string()),
+                    Err(error) => {
+                        restore_error = Some(Box::new(PortFailure::opening(previous.port, error)));
+                    }
                 }
             }
             Event::OpenFailed {
-                error: error.to_string(),
+                error: PortFailure::opening(settings.port, error),
                 retained: connection.as_ref().map(|current| current.settings.clone()),
                 restore_error,
             }
@@ -260,16 +379,22 @@ fn change_connection(connection: &mut Option<Connection>, settings: Settings) ->
     }
 }
 
-fn scan() -> serialport::Result<Vec<String>> {
-    let ports: Vec<String> = serialport::available_ports()?
-        .into_iter()
-        .map(|port| port.port_name)
-        .collect();
+fn scan() -> serialport::Result<Vec<PortInfo>> {
+    let ports = serialport::available_ports()?;
     #[cfg(target_os = "linux")]
     let ports = discovery::scan(ports);
+    #[cfg(not(target_os = "linux"))]
+    let ports = ports
+        .into_iter()
+        .map(|port| PortInfo {
+            node: port.port_name.clone(),
+            path: port.port_name,
+            kind: PortKind::from_serialport(&port.port_type),
+        })
+        .collect();
     let mut ports = ports;
-    ports.sort_unstable();
-    ports.dedup();
+    ports.sort_unstable_by(|left, right| left.path.cmp(&right.path));
+    ports.dedup_by(|left, right| left.path == right.path);
     Ok(ports)
 }
 
@@ -321,8 +446,7 @@ fn run(
                         ) {
                             events.send(Event::WriteFailed(error.to_string()))?;
                         } else {
-                            drop(connection.take());
-                            events.send(Event::Lost(error.to_string()))?;
+                            events.send(connection.take().unwrap().lost(error))?;
                         }
                     }
                 }
@@ -332,8 +456,8 @@ fn run(
         if let Some(current) = &mut connection {
             match current.port.read(&mut buf) {
                 Ok(0) => {
-                    drop(connection.take());
-                    events.send(Event::Lost("end of stream".into()))?;
+                    let error = io::Error::new(io::ErrorKind::UnexpectedEof, "end of stream");
+                    events.send(connection.take().unwrap().lost(error))?;
                 }
                 Ok(size) if !control.discard_rx.load(SeqCst) => {
                     events.send(Event::Rx(buf[..size].to_vec()))?;
@@ -347,8 +471,7 @@ fn run(
                             | io::ErrorKind::Interrupted
                     ) => {}
                 Err(error) => {
-                    drop(connection.take());
-                    events.send(Event::Lost(error.to_string()))?;
+                    events.send(connection.take().unwrap().lost(error))?;
                 }
             }
         }

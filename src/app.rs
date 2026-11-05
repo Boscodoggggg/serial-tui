@@ -3,6 +3,7 @@ use std::{
     fmt::Write as _,
     fs::OpenOptions,
     io::{BufWriter, Write},
+    ops::Range,
     path::PathBuf,
     sync::mpsc::TryRecvError,
     time::{Duration, Instant},
@@ -14,9 +15,17 @@ use serialport::{DataBits, FlowControl, Parity, StopBits};
 
 use crate::{
     capture::Capture,
-    serial::{Command, Event, Settings, Worker, data_bits_number, same_device, stop_bits_number},
+    serial::{
+        Command, Event, PortFailure, PortFailureKind, PortInfo, Settings, Worker, data_bits_number,
+        stop_bits_number,
+    },
     settings_store,
 };
+
+mod search;
+use search::{LogSearch, SearchInput};
+
+const CONNECT_ROW: usize = 6;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Language {
@@ -50,7 +59,16 @@ impl Language {
             "select_port" => ("Select a port", "请选择串口"),
             "connect" => ("Connect", "连接"),
             "apply" => ("Apply / Reconnect", "应用 / 重连"),
+            "reconnect" => ("Reconnect", "应用 / 重连"),
             "scan" => ("Refresh ports", "刷新串口"),
+            "refresh" => ("Refresh", "刷新"),
+            "scanning" => ("Refreshing…", "正在刷新…"),
+            "usb_port" => ("USB serial", "USB 转串口"),
+            "uart_port" => ("Onboard UART", "板载 UART"),
+            "pci_port" => ("PCI serial", "PCI 串口"),
+            "bluetooth_port" => ("Bluetooth", "蓝牙"),
+            "current_port" => ("Connected", "当前连接"),
+            "configured_port" => ("Configured path", "已设路径"),
             "disconnect" => ("Disconnect", "断开"),
             "online" => ("● Connected", "● 已连接"),
             "offline" => ("○ Disconnected", "○ 已断开"),
@@ -80,7 +98,13 @@ impl Language {
             "closed" => ("Port closed", "已断开串口"),
             "lost" => ("Port lost", "串口连接丢失"),
             "open_failed" => ("Could not open port", "无法打开串口"),
+            "port_permission" => ("Port access denied", "串口权限不足"),
+            "port_busy" => ("Port in use", "串口被占用"),
+            "port_missing" => ("Port missing", "串口设备不存在"),
+            "port_settings" => ("Serial settings rejected", "串口参数设置失败"),
+            "port_disconnected" => ("Device disconnected", "串口设备已断开"),
             "connection_kept" => ("Previous connection available", "原连接仍可用"),
+            "still_connected" => ("Still connected", "仍连接"),
             "restore_failed" => ("Could not restore previous connection", "无法恢复原连接"),
             "settings_load_failed" => ("Could not load saved settings", "无法读取上次的串口参数"),
             "settings_save_failed" => ("Could not save settings", "无法保存串口参数"),
@@ -90,6 +114,7 @@ impl Language {
             "busy" => ("Serial worker busy, try again", "串口繁忙，请重试"),
             "worker_down" => ("Serial worker stopped", "串口线程已停止"),
             "empty_send" => ("Enter something to send", "请输入要发送的内容"),
+            "connect_first" => ("Connect to a port first", "请先连接串口"),
             "bad_hex" => (
                 "Enter whole HEX bytes, e.g. 41 54 0D 0A",
                 "请输入完整 HEX 字节，例如 41 54 0D 0A",
@@ -116,6 +141,15 @@ impl Language {
             "latest" => ("Latest", "最新"),
             "pan" => ("Pan", "横移"),
             "view" => ("View", "显示"),
+            "search" => ("Find", "搜索"),
+            "search_log" => ("Find in log", "搜索日志"),
+            "search_empty" => ("Enter a search term", "请输入搜索内容"),
+            "search_not_found" => ("No matches in the log", "日志中未找到匹配项"),
+            "search_all" => ("All directions", "全部方向"),
+            "search_rx" => ("RX only", "仅接收"),
+            "search_scope" => ("Scope", "范围"),
+            "search_jump" => ("Jump", "跳转"),
+            "search_clear" => ("Clear find", "清除搜索"),
             "history" => ("History", "发送历史"),
             "quit" => ("Quit", "退出"),
             "min_size" => (
@@ -298,8 +332,11 @@ fn encode(message: &DraftMessage) -> Result<Vec<u8>, &'static str> {
     if message.format == Format::Text {
         return Ok([message.input.as_bytes(), message.ending.bytes()].concat());
     }
-    let hex: Vec<_> = message
-        .input
+    decode_hex(&message.input)
+}
+
+fn decode_hex(input: &str) -> Result<Vec<u8>, &'static str> {
+    let hex: Vec<_> = input
         .bytes()
         .filter(|byte| !byte.is_ascii_whitespace())
         .collect();
@@ -575,7 +612,6 @@ fn rx_prefix_len(bytes: &[u8], used: usize) -> usize {
 
 #[derive(Clone)]
 enum Value {
-    Port(String),
     Baud(u32),
     Data(DataBits),
     Stop(StopBits),
@@ -608,9 +644,88 @@ impl Menu {
     }
 }
 
+pub struct PortMenu {
+    pub ports: Vec<PortInfo>,
+    pub configured: Option<String>,
+    pub selected: usize,
+    offset: usize,
+}
+
+impl PortMenu {
+    fn new(ports: Vec<PortInfo>, draft: &str) -> Self {
+        let matched = ports.iter().position(|port| port.matches(draft));
+        let configured = (matched.is_none() && !draft.is_empty()).then(|| draft.to_owned());
+        let selected =
+            matched.unwrap_or_else(|| if configured.is_some() { ports.len() } else { 0 });
+        Self {
+            ports,
+            configured,
+            selected,
+            offset: 0,
+        }
+    }
+
+    pub fn manual_index(&self) -> usize {
+        self.ports.len() + usize::from(self.configured.is_some())
+    }
+
+    pub fn selected_path(&self) -> Option<&str> {
+        self.ports
+            .get(self.selected)
+            .map(|port| port.path.as_str())
+            .or(self
+                .configured
+                .as_deref()
+                .filter(|_| self.selected == self.ports.len()))
+    }
+
+    pub fn visible(&self, page: usize) -> Range<usize> {
+        let len = self.manual_index() + 1;
+        let offset = self
+            .offset
+            .min(len.saturating_sub(page))
+            .min(self.selected)
+            .max((self.selected + 1).saturating_sub(page));
+        offset..(offset + page).min(len)
+    }
+
+    fn refresh(&mut self, ports: Vec<PortInfo>, draft: &str) {
+        let mut next = Self::new(ports, draft);
+        let previous_device = self.ports.get(self.selected);
+        next.selected = match self.selected_path() {
+            None if self.manual_index() > 0 => next.manual_index(),
+            None => next.selected,
+            Some(path) => next
+                .ports
+                .iter()
+                .position(|port| port.path == path)
+                .or_else(|| {
+                    next.ports.iter().position(|port| match previous_device {
+                        Some(previous) => port.matches_previous(previous),
+                        None => port.matches(path),
+                    })
+                })
+                .or_else(|| {
+                    (self.selected == self.ports.len() && next.configured.as_deref() == Some(path))
+                        .then_some(next.ports.len())
+                })
+                .unwrap_or_else(|| {
+                    next.ports
+                        .len()
+                        .checked_sub(1)
+                        .map_or(next.manual_index(), |last| self.selected.min(last))
+                }),
+        };
+        next.offset = self.offset;
+        *self = next;
+    }
+}
+
 pub enum Modal {
     Menu(Menu),
+    Ports(PortMenu),
     Edit(EditField, Editor),
+    Search(SearchInput),
 }
 
 impl EditField {
@@ -646,7 +761,9 @@ pub struct App {
     pub input: Editor,
     pub log: Log,
     pub display: Format,
-    ports: Vec<String>,
+    search: Option<LogSearch>,
+    ports: Vec<PortInfo>,
+    scanning: bool,
     notice: Option<(&'static str, String)>,
     format: Format,
     ending: Ending,
@@ -689,7 +806,9 @@ impl App {
             input: Editor::default(),
             log: Log::default(),
             display: Format::Text,
+            search: None,
             ports: Vec::new(),
+            scanning: false,
             notice: None,
             format: Format::Text,
             ending: Ending::CrLf,
@@ -702,7 +821,7 @@ impl App {
             app.record_system("settings_load_failed", error.clone());
             app.notice("settings_load_failed", error);
         }
-        app.enqueue(Command::Scan);
+        app.refresh_ports();
         Ok(app)
     }
 
@@ -737,6 +856,32 @@ impl App {
         true
     }
 
+    fn refresh_ports(&mut self) {
+        if !self.scanning {
+            self.scanning = self.enqueue(Command::Scan);
+        }
+    }
+
+    pub fn port_scan_message(&self) -> String {
+        if self.scanning {
+            return self.lang.text("scanning").into();
+        }
+        match self.notice {
+            Some(("scan_failed" | "busy" | "worker_down", _)) => self.message(),
+            _ => String::new(),
+        }
+    }
+
+    fn switch_language(&mut self) {
+        self.lang = match self.lang {
+            Language::En => Language::Zh,
+            Language::Zh => Language::En,
+        };
+        if let Some(search) = &mut self.search {
+            search.clear_hit();
+        }
+    }
+
     fn connect(&mut self) {
         if self.pending {
             return;
@@ -751,6 +896,11 @@ impl App {
         self.pending = self.enqueue(Command::Open(self.draft.clone()));
     }
 
+    fn select_port(&mut self, path: &str) {
+        self.draft.port = path.into();
+        self.setting = CONNECT_ROW;
+    }
+
     fn disconnect(&mut self) {
         if self.pending || self.active.is_none() {
             return;
@@ -760,7 +910,7 @@ impl App {
         self.pending = self.enqueue(Command::Close);
     }
 
-    pub fn settings_rows(&self) -> [(String, String); 9] {
+    pub fn settings_rows(&self, compact: bool) -> [(String, String); 9] {
         let t = |key| self.lang.text(key).to_owned();
         [
             (
@@ -779,10 +929,12 @@ impl App {
             (
                 format!(
                     "[ {} ]",
-                    t(if self.active.is_some() {
-                        "apply"
-                    } else {
+                    t(if self.active.is_none() {
                         "connect"
+                    } else if compact {
+                        "reconnect"
+                    } else {
+                        "apply"
                     })
                 ),
                 String::new(),
@@ -792,7 +944,7 @@ impl App {
         ]
     }
 
-    pub fn options_rows(&self) -> [String; 4] {
+    pub fn options_rows(&self, compact: bool) -> [String; 4] {
         let t = |key| self.lang.text(key);
         [
             format!("{} {}", t("format"), t(self.format.label())),
@@ -805,16 +957,49 @@ impl App {
                     t(self.ending.label())
                 }
             ),
-            t("presets").into(),
+            format!("F7 {}", t("presets")),
             format!(
-                "{} {}",
-                t("repeat"),
+                "F10 {} {}",
+                if compact {
+                    self.lang.pick("Repeat", "循环")
+                } else {
+                    t("repeat")
+                },
                 self.repeat.as_ref().map_or_else(
                     || t("off").into(),
                     |repeat| format!("{} ms", repeat.interval.as_millis())
                 )
             ),
         ]
+    }
+
+    pub fn send_hint(&self) -> Option<String> {
+        if self.pending {
+            return Some(self.lang.text("pending").into());
+        }
+        if self.active.is_none() {
+            return Some(
+                self.lang
+                    .pick("Connect first · F2 Ports", "请先连接串口 · F2 设置")
+                    .into(),
+            );
+        }
+        if let Some(repeat) = &self.repeat {
+            let ms = repeat.interval.as_millis();
+            return Some(match self.lang {
+                Language::En => format!("Every {ms} ms · F10 Stop"),
+                Language::Zh => format!("每 {ms} ms 发送 · F10 停止"),
+            });
+        }
+        (self.pane == Pane::Input).then(|| {
+            if self.input.value.is_empty() {
+                self.lang
+                    .pick("Type a command · Enter Send", "输入指令 · Enter 发送")
+                    .into()
+            } else {
+                format!("Enter {}", self.lang.text("send_now"))
+            }
+        })
     }
 
     fn parity(&self, parity: Parity) -> String {
@@ -864,25 +1049,10 @@ impl App {
         ];
         match self.setting {
             0 => {
-                let mut ports = self.ports.clone();
-                let selected = ports
-                    .iter()
-                    .position(|port| same_device(port, &self.draft.port))
-                    .unwrap_or_else(|| {
-                        if !self.draft.port.is_empty() {
-                            ports.insert(0, self.draft.port.clone());
-                        }
-                        0
-                    });
-                let mut choices: Vec<_> = ports
-                    .into_iter()
-                    .map(|port| (clean_text(port.clone()), Value::Port(port)))
-                    .collect();
-                choices.push((
-                    self.lang.text("manual_port").into(),
-                    Value::Edit(EditField::Port),
-                ));
-                self.menu("port", choices, selected);
+                self.modal = Some(Modal::Ports(PortMenu::new(
+                    self.ports.clone(),
+                    &self.draft.port,
+                )));
             }
             1 => {
                 let mut choices: Vec<_> = BAUD
@@ -928,10 +1098,8 @@ impl App {
                     .collect(),
                 index_of(&FLOW, &self.draft.flow),
             ),
-            6 => self.connect(),
-            7 => {
-                self.enqueue(Command::Scan);
-            }
+            CONNECT_ROW => self.connect(),
+            7 => self.refresh_ports(),
             8 => self.disconnect(),
             _ => {}
         }
@@ -991,7 +1159,6 @@ impl App {
 
     fn apply(&mut self, value: Value) {
         match value {
-            Value::Port(port) => self.draft.port = port,
             Value::Baud(baud) => self.draft.baud = baud,
             Value::Data(bits) => self.draft.data = bits,
             Value::Stop(bits) => self.draft.stop = bits,
@@ -1026,7 +1193,7 @@ impl App {
         let problem = match field {
             EditField::Port if value.is_empty() => Some(("select_port", String::new())),
             EditField::Port => {
-                self.draft.port = value.into();
+                self.select_port(value);
                 None
             }
             EditField::Baud => match value.parse::<u32>() {
@@ -1058,12 +1225,35 @@ impl App {
         }
     }
 
-    fn modal_key(&mut self, event: KeyEvent) {
+    fn modal_key(&mut self, event: KeyEvent, log_height: usize, port_page: usize) {
         let Some(mut modal) = self.modal.take() else {
             return;
         };
         match &mut modal {
             _ if event.code == KeyCode::Esc => return,
+            Modal::Ports(menu) => {
+                let last = menu.manual_index();
+                menu.offset = menu.visible(port_page).start;
+                match event.code {
+                    KeyCode::Up => menu.selected = menu.selected.saturating_sub(1),
+                    KeyCode::Down => menu.selected = (menu.selected + 1).min(last),
+                    KeyCode::PageUp => menu.selected = menu.selected.saturating_sub(port_page),
+                    KeyCode::PageDown => menu.selected = (menu.selected + port_page).min(last),
+                    KeyCode::Home => menu.selected = 0,
+                    KeyCode::End => menu.selected = last,
+                    KeyCode::F(5) => self.refresh_ports(),
+                    KeyCode::F(6) => self.switch_language(),
+                    KeyCode::Enter => {
+                        if let Some(path) = menu.selected_path() {
+                            self.select_port(path);
+                        } else {
+                            self.apply(Value::Edit(EditField::Port));
+                        }
+                        return;
+                    }
+                    _ => {}
+                }
+            }
             Modal::Menu(menu) => match event.code {
                 KeyCode::Up => menu.selected = menu.selected.saturating_sub(1),
                 KeyCode::Down => menu.selected = (menu.selected + 1).min(menu.choices.len() - 1),
@@ -1082,6 +1272,19 @@ impl App {
                 }
                 editor.key(event);
             }
+            Modal::Search(input) => match event.code {
+                KeyCode::Tab => input.hex = !input.hex,
+                KeyCode::F(3) => input.rx_only = !input.rx_only,
+                KeyCode::Enter => match input.compile() {
+                    Ok(search) => {
+                        self.search = Some(search);
+                        self.jump_to_match(log_height, true);
+                        return;
+                    }
+                    Err(key) => self.notice(key, String::new()),
+                },
+                _ => input.editor.key(event),
+            },
         }
         self.modal = Some(modal);
     }
@@ -1128,7 +1331,7 @@ impl App {
             return;
         }
         if self.active.is_none() {
-            self.notice("select_port", String::new());
+            self.notice("connect_first", String::new());
             return;
         }
         let message = self.draft_message();
@@ -1191,16 +1394,41 @@ impl App {
     }
 
     pub fn paste(&mut self, input: &str) {
-        if let Some(Modal::Edit(_, editor)) = &mut self.modal {
-            editor.insert(input);
-        } else if self.modal.is_none() && self.pane == Pane::Input {
-            self.input.insert(input);
-            self.history_index = None;
+        match &mut self.modal {
+            Some(Modal::Edit(_, editor)) => editor.insert(input),
+            Some(Modal::Search(search)) => search.editor.insert(input),
+            None if self.pane == Pane::Input => {
+                self.input.insert(input);
+                self.history_index = None;
+            }
+            _ => {}
         }
     }
 
+    fn jump_to_match(&mut self, height: usize, reverse: bool) {
+        let Some(search) = &mut self.search else {
+            self.notice("search_empty", String::new());
+            return;
+        };
+        if search.jump(&mut self.log, self.mode, self.lang, height, reverse) {
+            self.display = search.format();
+        } else {
+            self.notice("search_not_found", String::new());
+        }
+    }
+
+    pub fn search_label(&self) -> Option<String> {
+        let search = self.search.as_ref()?;
+        let scope = if search.rx_only { " RX" } else { "" };
+        Some(format!("/{}{}", search.input, scope))
+    }
+
+    pub fn search_highlight(&self, entry: &LogEntry) -> Option<Range<usize>> {
+        self.search.as_ref()?.highlight(entry, self.display)
+    }
+
     // Returns true when the application should exit.
-    pub fn key(&mut self, event: KeyEvent, log_height: usize) -> bool {
+    pub fn key(&mut self, event: KeyEvent, log_height: usize, port_page: usize) -> bool {
         if matches!(event.code, KeyCode::Char('q' | 'c'))
             && event.modifiers.contains(KeyModifiers::CONTROL)
         {
@@ -1208,19 +1436,18 @@ impl App {
         }
         self.notice = None;
         if self.modal.is_some() {
-            self.modal_key(event);
+            self.modal_key(event, log_height, port_page);
             return false;
         }
         match event.code {
             KeyCode::F(2) => self.pane = Pane::Settings,
             KeyCode::F(3) => self.switch_mode(),
             KeyCode::F(4) => self.log.toggle_follow(),
-            KeyCode::F(6) => {
-                self.lang = if self.lang == Language::En {
-                    Language::Zh
-                } else {
-                    Language::En
-                }
+            KeyCode::F(6) => self.switch_language(),
+            KeyCode::F(7 | 10) if self.mode != Mode::Rx => {
+                self.pane = Pane::Options;
+                self.option = if event.code == KeyCode::F(7) { 2 } else { 3 };
+                self.activate_option();
             }
             KeyCode::F(8) => self.apply(Value::Edit(EditField::Export)),
             KeyCode::F(9) => {
@@ -1253,6 +1480,15 @@ impl App {
                     KeyCode::End => self.log.follow(),
                     KeyCode::Left => self.log.horizontal = self.log.horizontal.saturating_sub(8),
                     KeyCode::Right => self.log.horizontal = (self.log.horizontal + 8).min(5000),
+                    KeyCode::Char('/') => {
+                        self.modal = Some(Modal::Search(SearchInput::new(
+                            self.search.as_ref(),
+                            self.display,
+                        )));
+                    }
+                    KeyCode::Char('n') => self.jump_to_match(log_height, false),
+                    KeyCode::Char('N') => self.jump_to_match(log_height, true),
+                    KeyCode::Esc => self.search = None,
                     KeyCode::Char('h' | 'H') => {
                         self.display = match self.display {
                             Format::Text => Format::Hex,
@@ -1297,6 +1533,7 @@ impl App {
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
                     self.worker.events = None;
+                    self.scanning = false;
                     self.active = None;
                     self.pending = false;
                     self.stop_repeat();
@@ -1391,10 +1628,27 @@ impl App {
         }
     }
 
+    fn record_port_failure(&mut self, error: &PortFailure, fallback: &'static str) -> &'static str {
+        let key = match error.kind {
+            PortFailureKind::Permission => "port_permission",
+            PortFailureKind::Busy => "port_busy",
+            PortFailureKind::Missing => "port_missing",
+            PortFailureKind::Settings => "port_settings",
+            PortFailureKind::Disconnected => "port_disconnected",
+            PortFailureKind::Other => fallback,
+        };
+        self.record_system(key, format!("{} · {}", error.path, error.detail));
+        key
+    }
+
     fn serial_event(&mut self, event: Event) {
         match event {
             Event::Ports(ports) => {
+                self.scanning = false;
                 self.notice("found", ports.len().to_string());
+                if let Some(Modal::Ports(menu)) = &mut self.modal {
+                    menu.refresh(ports.clone(), &self.draft.port);
+                }
                 self.ports = ports;
             }
             Event::Opened(settings) => {
@@ -1421,25 +1675,33 @@ impl App {
                 restore_error,
             } => {
                 self.pending = false;
-                self.record_system("open_failed", error.clone());
+                let key = self.record_port_failure(&error, "open_failed");
                 if let Some(settings) = &retained {
                     self.record_system("connection_kept", settings.summary());
-                    self.notice("connection_kept", error);
+                    let still_connected = self.lang.text("still_connected");
+                    self.notice(
+                        key,
+                        format!("{} · {still_connected} {}", error.path, settings.port),
+                    );
                 } else if let Some(restore_error) = restore_error {
-                    self.record_system("restore_failed", restore_error.clone());
-                    self.notice("restore_failed", restore_error);
+                    self.record_system("restore_failed", restore_error.path.clone());
+                    self.record_port_failure(&restore_error, "open_failed");
+                    self.notice("restore_failed", restore_error.path);
                 } else {
-                    self.notice("open_failed", error);
+                    self.notice(key, error.path);
                 }
                 self.active = retained;
             }
             Event::Lost(error) => {
                 self.active = None;
                 self.stop_repeat();
-                self.record_system("lost", error.clone());
-                self.notice("lost", error);
+                let key = self.record_port_failure(&error, "lost");
+                self.notice(key, error.path);
             }
-            Event::ScanFailed(error) => self.notice("scan_failed", error),
+            Event::ScanFailed(error) => {
+                self.scanning = false;
+                self.notice("scan_failed", error);
+            }
             Event::WriteFailed(error) => {
                 self.stop_repeat();
                 self.record_system("write_failed", error.clone());
@@ -1467,6 +1729,108 @@ fn index_of<T: PartialEq>(values: &[T], selected: &T) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn port_popup_pages_and_keeps_the_selected_device_when_refresh_changes_its_path() {
+        use crate::{serial::PortKind, ui};
+        use ratatui::{Terminal, backend::TestBackend, layout::Rect};
+
+        let mut app = App::new(Language::En, Some("/dev/ttyS0".into()), None).unwrap();
+        let mut ports: Vec<_> = (0..14)
+            .map(|index| {
+                let path = format!("/dev/ttyS{index}");
+                PortInfo {
+                    node: path.clone(),
+                    path,
+                    kind: PortKind::OnboardUart,
+                }
+            })
+            .collect();
+        app.serial_event(Event::Ports(ports.clone()));
+        let screen = Rect::new(0, 0, 64, 17);
+        let key = |app: &mut App, code| {
+            app.key(
+                KeyEvent::new(code, KeyModifiers::NONE),
+                ui::log_height(screen, app.mode),
+                ui::port_page_size(screen, app),
+            );
+        };
+        key(&mut app, KeyCode::Enter);
+        let page = ui::port_page_size(screen, &app);
+        key(&mut app, KeyCode::PageDown);
+        let node = ports[page].path.clone();
+        let alias = "/dev/serial/by-id/usb-FTDI_abcdefghijklmno0123456789-if00-port0";
+        key(&mut app, KeyCode::F(5));
+        assert_eq!(app.port_scan_message(), "Refreshing…");
+        ports[page].path = alias.into();
+        ports[page].kind = PortKind::Usb;
+        ports.remove(0);
+        app.serial_event(Event::Ports(ports.clone()));
+        app.active = Some(Settings {
+            port: node.clone(),
+            ..Settings::default()
+        });
+
+        let Some(Modal::Ports(menu)) = &app.modal else {
+            panic!("refresh should keep the popup open");
+        };
+        assert_eq!(menu.selected_path(), Some(alias));
+        assert_eq!(menu.selected, page - 1);
+        let visible = menu.visible(ui::port_page_size(screen, &app));
+        assert!(visible.contains(&menu.selected) && visible.start > 0);
+
+        for (title, usb, connected, refresh) in [
+            ("Port · 13 devices", "USB serial", "Connected", "F5 Refresh"),
+            ("串 口", "USB 转 串 口", "当 前 连 接", "F5 刷 新"),
+        ] {
+            let mut terminal =
+                Terminal::new(TestBackend::new(screen.width, screen.height)).unwrap();
+            terminal.draw(|frame| ui::draw(frame, &app)).unwrap();
+            let output: String = terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect();
+            for text in [title, usb, connected, refresh, &node, "port0", "PgUp/PgDn"] {
+                assert!(output.contains(text), "{text}: {output}");
+            }
+            key(&mut app, KeyCode::F(6));
+        }
+
+        key(&mut app, KeyCode::F(5));
+        app.serial_event(Event::ScanFailed("fixture error".into()));
+        assert_eq!(
+            app.port_scan_message(),
+            "Could not list ports · fixture error"
+        );
+        let Some(Modal::Ports(menu)) = &app.modal else {
+            panic!("failed refresh should keep the popup open");
+        };
+        assert_eq!(menu.selected_path(), Some(alias));
+        let mut selected = ports.remove(page - 1);
+        selected.path = "/dev/serial/by-path/usb-connector".into();
+        ports.push(selected);
+        app.serial_event(Event::Ports(ports.clone()));
+        let Some(Modal::Ports(menu)) = &app.modal else {
+            panic!("alias fallback should keep the popup open");
+        };
+        assert_eq!(
+            menu.selected_path(),
+            Some("/dev/serial/by-path/usb-connector")
+        );
+        ports.retain(|port| port.node != node);
+        let last = ports.len() - 1;
+        app.serial_event(Event::Ports(ports));
+        let Some(Modal::Ports(menu)) = &app.modal else {
+            panic!("device removal should keep the popup open");
+        };
+        assert_eq!(menu.selected, last);
+        key(&mut app, KeyCode::End);
+        key(&mut app, KeyCode::Enter);
+        assert!(matches!(app.modal, Some(Modal::Edit(EditField::Port, _))));
+    }
 
     #[test]
     fn hex_send_preserves_binary_bytes_without_adding_eol() {
