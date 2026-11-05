@@ -12,6 +12,9 @@ use std::{
 use serde::{Deserialize, Serialize};
 use serialport::{DataBits, FlowControl, Parity, SerialPort, StopBits};
 
+#[cfg(target_os = "linux")]
+mod discovery;
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Settings {
     pub port: String,
@@ -202,12 +205,19 @@ struct Connection {
     settings: Settings,
 }
 
-fn same_device(left: &str, right: &str) -> bool {
-    left == right
-        || std::fs::canonicalize(left)
-            .ok()
-            .zip(std::fs::canonicalize(right).ok())
-            .is_some_and(|(left, right)| left == right)
+pub fn same_device(left: &str, right: &str) -> bool {
+    if left == right {
+        return true;
+    }
+    #[cfg(target_os = "linux")]
+    return discovery::device_id(left.as_ref())
+        .zip(discovery::device_id(right.as_ref()))
+        .is_some_and(|(left, right)| left == right);
+    #[cfg(not(target_os = "linux"))]
+    std::fs::canonicalize(left)
+        .ok()
+        .zip(std::fs::canonicalize(right).ok())
+        .is_some_and(|(left, right)| left == right)
 }
 
 fn change_connection(connection: &mut Option<Connection>, settings: Settings) -> Event {
@@ -251,17 +261,13 @@ fn change_connection(connection: &mut Option<Connection>, settings: Settings) ->
 }
 
 fn scan() -> serialport::Result<Vec<String>> {
-    let mut ports: Vec<_> = serialport::available_ports()?
+    let ports: Vec<String> = serialport::available_ports()?
         .into_iter()
         .map(|port| port.port_name)
         .collect();
-    if let Ok(entries) = std::fs::read_dir("/dev/serial/by-id") {
-        ports.extend(
-            entries
-                .flatten()
-                .filter_map(|entry| entry.path().into_os_string().into_string().ok()),
-        );
-    }
+    #[cfg(target_os = "linux")]
+    let ports = discovery::scan(ports);
+    let mut ports = ports;
     ports.sort_unstable();
     ports.dedup();
     Ok(ports)

@@ -14,7 +14,7 @@ use serialport::{DataBits, FlowControl, Parity, StopBits};
 
 use crate::{
     capture::Capture,
-    serial::{Command, Event, Settings, Worker, data_bits_number, stop_bits_number},
+    serial::{Command, Event, Settings, Worker, data_bits_number, same_device, stop_bits_number},
     settings_store,
 };
 
@@ -865,10 +865,15 @@ impl App {
         match self.setting {
             0 => {
                 let mut ports = self.ports.clone();
-                if !self.draft.port.is_empty() && !ports.contains(&self.draft.port) {
-                    ports.insert(0, self.draft.port.clone());
-                }
-                let selected = index_of(&ports, &self.draft.port);
+                let selected = ports
+                    .iter()
+                    .position(|port| same_device(port, &self.draft.port))
+                    .unwrap_or_else(|| {
+                        if !self.draft.port.is_empty() {
+                            ports.insert(0, self.draft.port.clone());
+                        }
+                        0
+                    });
                 let mut choices: Vec<_> = ports
                     .into_iter()
                     .map(|port| (clean_text(port.clone()), Value::Port(port)))

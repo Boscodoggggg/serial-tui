@@ -53,6 +53,8 @@ chmod +x ./serial-tui
 
 在插着串口设备的 Linux 机器上运行程序。遇到权限错误时，可用 `ls -l /dev/ttyUSB0` 查看设备节点，并使用有访问权限的账号运行。建议使用至少 80 列 × 24 行的终端。
 
+「刷新串口」根据 Linux 设备信息列出 USB 转串口和板载 UART。同一设备只显示一项，有 `by-id` 或 `by-path` 链接时优先使用这些稳定路径。选择「连接」后才会尝试打开设备。
+
 工具会把上次成功连接的参数保存到 `$XDG_STATE_HOME/serial-tui/last-connection.json`，默认位置是 `~/.local/state/serial-tui/last-connection.json`。`--port` 和 `--baud` 可以覆盖本次启动的对应参数，仍需手动选择「连接」。应用新参数失败时，工具会保留原连接，或尝试按旧参数恢复。
 
 | 模式 | 行为 |

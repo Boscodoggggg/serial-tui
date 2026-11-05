@@ -53,6 +53,8 @@ Use `F6` to switch the interface language and `Ctrl+Q` to exit.
 
 Run the app on the Linux machine the adapter is plugged into. If access is denied, check the device node with `ls -l /dev/ttyUSB0` and use an account that can open it. Use an 80×24 terminal or larger for more room to read the log.
 
+**Refresh ports** lists USB adapters and onboard UARTs using Linux device information. Each device appears once, preferring a stable `by-id` or `by-path` link when one exists. Choose **Connect** to check that the device can be opened.
+
 The app remembers the last successful connection in `$XDG_STATE_HOME/serial-tui/last-connection.json` (default: `~/.local/state/serial-tui/last-connection.json`). `--port` and `--baud` override the saved values for that launch. Select **Connect** to open the device. If applying new settings fails, the app keeps the previous connection or attempts to reopen it with its previous settings.
 
 | Mode | Behavior |
