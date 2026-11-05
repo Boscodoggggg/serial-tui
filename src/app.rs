@@ -22,7 +22,10 @@ use crate::{
     settings_store,
 };
 
+mod log_view;
 mod search;
+pub use log_view::LogViewport;
+pub(crate) use log_view::pan_byte;
 use search::{LogSearch, SearchInput};
 
 const CONNECT_ROW: usize = 6;
@@ -83,6 +86,7 @@ impl Language {
             "tx_log" => ("Send log", "发送日志"),
             "following" => ("Following", "跟随最新"),
             "paused" => ("Paused", "已暂停"),
+            "wrap" => ("Wrap", "换行"),
             "empty_log" => ("No records yet", "暂无记录"),
             "text" => ("Text", "文本"),
             "send" => ("Send", "发送区"),
@@ -369,6 +373,14 @@ impl Direction {
             Self::Tx => "TX",
         }
     }
+
+    fn visible_in(self, mode: Mode) -> bool {
+        match self {
+            Self::System => true,
+            Self::Rx => mode != Mode::Tx,
+            Self::Tx => mode != Mode::Rx,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -448,12 +460,15 @@ fn hex(bytes: &[u8]) -> String {
 struct PausedLog {
     entries: VecDeque<LogEntry>,
     anchor: u64,
+    byte: Option<usize>,
+    sequence_at_pause: u64,
 }
 
 pub struct Log {
     entries: VecDeque<LogEntry>,
     sequence: u64,
     paused: Option<PausedLog>,
+    pub wrap: bool,
     pub horizontal: usize,
     pub rx: u64,
     pub tx: u64,
@@ -465,6 +480,7 @@ impl Default for Log {
             entries: VecDeque::new(),
             sequence: 1,
             paused: None,
+            wrap: false,
             horizontal: 0,
             rx: 0,
             tx: 0,
@@ -526,11 +542,7 @@ impl Log {
             .as_ref()
             .map_or(&self.entries, |paused| &paused.entries)
             .iter()
-            .filter(|entry| match entry.direction {
-                Direction::System => true,
-                Direction::Rx => mode != Mode::Tx,
-                Direction::Tx => mode != Mode::Rx,
-            })
+            .filter(|entry| entry.direction.visible_in(mode))
             .collect()
     }
 
@@ -569,18 +581,31 @@ impl Log {
     }
 
     fn pause_at(&mut self, anchor: u64) {
+        self.pause_at_byte(anchor, None);
+    }
+
+    fn pause_at_byte(&mut self, anchor: u64, byte: Option<usize>) {
         if let Some(paused) = &mut self.paused {
             paused.anchor = anchor;
+            paused.byte = byte;
         } else {
             self.paused = Some(PausedLog {
                 entries: self.entries.clone(),
                 anchor,
+                byte,
+                sequence_at_pause: self.sequence,
             });
         }
     }
 
     pub fn is_paused(&self) -> bool {
         self.paused.is_some()
+    }
+
+    pub fn new_since_pause(&self) -> Option<u64> {
+        self.paused
+            .as_ref()
+            .map(|paused| self.sequence - paused.sequence_at_pause)
     }
 
     fn follow(&mut self) {
@@ -1237,7 +1262,7 @@ impl App {
         }
     }
 
-    fn modal_key(&mut self, event: KeyEvent, log_height: usize, port_page: usize) {
+    fn modal_key(&mut self, event: KeyEvent, log_viewport: LogViewport, port_page: usize) {
         let Some(mut modal) = self.modal.take() else {
             return;
         };
@@ -1290,7 +1315,7 @@ impl App {
                 KeyCode::Enter => match input.compile() {
                     Ok(search) => {
                         self.search = Some(search);
-                        self.jump_to_match(log_height, true);
+                        self.jump_to_match(log_viewport, true);
                         return;
                     }
                     Err(key) => self.notice(key, String::new()),
@@ -1417,12 +1442,12 @@ impl App {
         }
     }
 
-    fn jump_to_match(&mut self, height: usize, reverse: bool) {
+    fn jump_to_match(&mut self, viewport: LogViewport, reverse: bool) {
         let Some(search) = &mut self.search else {
             self.notice("search_empty", String::new());
             return;
         };
-        if search.jump(&mut self.log, self.mode, self.lang, height, reverse) {
+        if search.jump(&mut self.log, self.mode, self.lang, viewport, reverse) {
             self.display = search.format();
         } else {
             self.notice("search_not_found", String::new());
@@ -1439,8 +1464,18 @@ impl App {
         self.search.as_ref()?.highlight(entry, self.display)
     }
 
+    fn scroll_log(&mut self, viewport: LogViewport, delta: isize) {
+        if self.log.wrap {
+            self.log
+                .scroll_wrapped(self.mode, self.lang, self.display, viewport, delta);
+        } else {
+            self.log.scroll(self.mode, viewport.height, delta);
+        }
+    }
+
     // Returns true when the application should exit.
-    pub fn key(&mut self, event: KeyEvent, log_height: usize, port_page: usize) -> bool {
+    pub fn key(&mut self, event: KeyEvent, log_viewport: LogViewport, port_page: usize) -> bool {
+        let log_height = log_viewport.height;
         if matches!(event.code, KeyCode::Char('q' | 'c'))
             && event.modifiers.contains(KeyModifiers::CONTROL)
         {
@@ -1448,7 +1483,7 @@ impl App {
         }
         self.notice = None;
         if self.modal.is_some() {
-            self.modal_key(event, log_height, port_page);
+            self.modal_key(event, log_viewport, port_page);
             return false;
         }
         match event.code {
@@ -1479,27 +1514,33 @@ impl App {
                     _ => {}
                 },
                 Pane::Log => match key {
-                    KeyCode::Up => self.log.scroll(self.mode, log_height, -1),
-                    KeyCode::Down => self.log.scroll(self.mode, log_height, 1),
-                    KeyCode::PageUp => {
+                    KeyCode::Up => self.scroll_log(log_viewport, -1),
+                    KeyCode::Down => self.scroll_log(log_viewport, 1),
+                    KeyCode::PageUp => self.scroll_log(log_viewport, -(log_height as isize)),
+                    KeyCode::PageDown => self.scroll_log(log_viewport, log_height as isize),
+                    KeyCode::Home => self.scroll_log(log_viewport, isize::MIN),
+                    KeyCode::End => {
+                        self.log.follow();
+                        self.log.horizontal = 0;
+                    }
+                    KeyCode::Left if !self.log.wrap => {
+                        self.log.horizontal = self.log.horizontal.saturating_sub(8);
+                    }
+                    KeyCode::Right if !self.log.wrap => {
+                        self.log.horizontal = (self.log.horizontal + 8).min(5000);
+                    }
+                    KeyCode::Char('w' | 'W') => {
                         self.log
-                            .scroll(self.mode, log_height, -(log_height as isize))
+                            .toggle_wrap(self.mode, self.lang, self.display, log_viewport);
                     }
-                    KeyCode::PageDown => {
-                        self.log.scroll(self.mode, log_height, log_height as isize)
-                    }
-                    KeyCode::Home => self.log.scroll(self.mode, log_height, isize::MIN),
-                    KeyCode::End => self.log.follow(),
-                    KeyCode::Left => self.log.horizontal = self.log.horizontal.saturating_sub(8),
-                    KeyCode::Right => self.log.horizontal = (self.log.horizontal + 8).min(5000),
                     KeyCode::Char('/') => {
                         self.modal = Some(Modal::Search(SearchInput::new(
                             self.search.as_ref(),
                             self.display,
                         )));
                     }
-                    KeyCode::Char('n') => self.jump_to_match(log_height, false),
-                    KeyCode::Char('N') => self.jump_to_match(log_height, true),
+                    KeyCode::Char('n') => self.jump_to_match(log_viewport, false),
+                    KeyCode::Char('N') => self.jump_to_match(log_viewport, true),
                     KeyCode::Esc => self.search = None,
                     KeyCode::Char('h' | 'H') => {
                         self.display = match self.display {
@@ -1768,7 +1809,14 @@ mod tests {
             app
         };
         let press = |app: &mut App, key| {
-            app.key(KeyEvent::new(key, KeyModifiers::NONE), 10, 8);
+            app.key(
+                KeyEvent::new(key, KeyModifiers::NONE),
+                LogViewport {
+                    height: 10,
+                    width: 40,
+                },
+                8,
+            );
         };
 
         for (mode, pane) in [
@@ -1816,7 +1864,7 @@ mod tests {
         let key = |app: &mut App, code| {
             app.key(
                 KeyEvent::new(code, KeyModifiers::NONE),
-                ui::log_height(screen, app.mode),
+                ui::log_viewport(screen, app.mode),
                 ui::port_page_size(screen, app),
             );
         };
@@ -1967,10 +2015,15 @@ mod tests {
         log.receive(&b"new\n".repeat(2100));
         assert_eq!(log.visible(Mode::Rx, 1)[0].data, b"last visible\n");
         assert_eq!(log.entries.len(), 2000);
+        assert_eq!(log.new_since_pause(), Some(2100));
 
         log.scroll(Mode::Rx, 1, -1);
         assert_eq!(log.visible(Mode::Rx, 1)[0].data, b"first\n");
+        assert_eq!(log.new_since_pause(), Some(2100));
         log.follow();
         assert_eq!(log.visible(Mode::Rx, 1)[0].data, b"new\n");
+        assert_eq!(log.new_since_pause(), None);
+        log.toggle_follow();
+        assert_eq!(log.new_since_pause(), Some(0));
     }
 }

@@ -809,7 +809,7 @@ dependencies = [
 
 [[package]]
 name = "serial-tui"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "chrono",
  "crossterm",
@@ -818,6 +818,7 @@ dependencies = [
  "serde_json",
  "serialport",
  "tempfile",
+ "unicode-segmentation",
  "unicode-width",
 ]
 

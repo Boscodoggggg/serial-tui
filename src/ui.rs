@@ -1,3 +1,5 @@
+use std::ops::Range;
+
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Layout, Position, Rect},
@@ -8,7 +10,10 @@ use ratatui::{
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
-    app::{App, Direction, Editor, Modal, Mode, Pane, PortMenu, clean_text},
+    app::{
+        App, Direction, Editor, Language, LogEntry, LogViewport, Modal, Mode, Pane, PortMenu,
+        clean_text, pan_byte,
+    },
     serial::{PortKind, same_device},
 };
 
@@ -20,6 +25,7 @@ const DIM: Color = Color::Rgb(157, 177, 192);
 const EDGE: Color = Color::Rgb(82, 107, 125);
 const MINT: Color = Color::Rgb(128, 225, 206);
 const AMBER: Color = Color::Rgb(247, 200, 132);
+const LOG_PREFIX_WIDTH: u16 = 18;
 const FOCUS: Style = Style::new()
     .fg(Color::Rgb(17, 47, 42))
     .bg(MINT)
@@ -74,8 +80,12 @@ impl Areas {
     }
 }
 
-pub fn log_height(area: Rect, mode: Mode) -> usize {
-    Areas::new(area, mode).map_or(1, |areas| usize::from(areas.log.height.saturating_sub(3)))
+pub fn log_viewport(area: Rect, mode: Mode) -> LogViewport {
+    let log = Areas::new(area, mode).map_or(Rect::default(), |areas| areas.log);
+    LogViewport {
+        height: usize::from(log.height.saturating_sub(3).max(1)),
+        width: usize::from(log.width.saturating_sub(4 + LOG_PREFIX_WIDTH).max(1)),
+    }
 }
 
 fn panel(title: &str, focused: bool, bg: Color) -> Block<'_> {
@@ -228,25 +238,41 @@ fn draw_settings(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_log(frame: &mut Frame, app: &App, area: Rect) {
-    let block = panel(
-        app.lang.text(app.mode.log_title()),
-        app.pane == Pane::Log,
-        BACKGROUND,
+    let name = app.lang.text(app.mode.log_title());
+    let title = app.log.new_since_pause().map_or_else(
+        || name.to_owned(),
+        |count| {
+            let paused = app.lang.text("paused");
+            let status = match app.lang {
+                Language::En => format!("{paused} · {count} new"),
+                Language::Zh => format!("{paused} · 新增 {count} 条"),
+            };
+            let title = format!("{name} · {status}");
+            if title.width() + 4 <= usize::from(area.width) {
+                title
+            } else {
+                status
+            }
+        },
     );
+    let block = panel(&title, app.pane == Pane::Log, BACKGROUND);
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    let follow = app.lang.text(if app.log.is_paused() {
-        "paused"
-    } else {
-        "following"
-    });
     let counters = format!("RX {} B / TX {} B", app.log.rx, app.log.tx);
     let [format_area, count_area] = Layout::horizontal([
         Constraint::Min(1),
         Constraint::Length(counters.len() as u16),
     ])
     .areas(Rect::new(inner.x, inner.y, inner.width, 1));
-    let mut format = format!("{} · {follow}", app.lang.text(app.display.label()));
+    let mut format = app.lang.text(app.display.label()).to_owned();
+    if app.log.wrap {
+        format.push_str(" · ");
+        format.push_str(app.lang.text("wrap"));
+    }
+    if !app.log.is_paused() {
+        format.push_str(" · ");
+        format.push_str(app.lang.text("following"));
+    }
     if let Some(search) = app.search_label() {
         format.push_str(" · ");
         format.push_str(&search);
@@ -254,23 +280,58 @@ fn draw_log(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(Line::styled(format, Style::new().fg(DIM)), format_area);
     frame.render_widget(Line::styled(counters, Style::new().fg(DIM)), count_area);
 
-    let entries = app
-        .log
-        .visible(app.mode, inner.height.saturating_sub(1) as usize);
-    if entries.is_empty() {
+    let viewport = LogViewport {
+        height: usize::from(inner.height.saturating_sub(1)),
+        width: usize::from(inner.width.saturating_sub(LOG_PREFIX_WIDTH).max(1)),
+    };
+    let mut y = inner.y + 1;
+    let mut draw_row = |entry: &LogEntry, body: &str, range: Range<usize>| {
+        draw_log_row(
+            frame,
+            app,
+            entry,
+            body,
+            range,
+            Rect::new(inner.x, y, inner.width, 1),
+        );
+        y += 1;
+    };
+    if app.log.wrap {
+        for record in app.log.wrapped(app.mode, app.lang, app.display, viewport) {
+            for range in record.rows {
+                draw_row(record.entry, &record.body, range);
+            }
+        }
+    } else {
+        for entry in app.log.visible(app.mode, viewport.height) {
+            let body = entry.body(app.lang, app.display);
+            let offset = pan_byte(&body, app.log.horizontal);
+            draw_row(entry, &body, offset..body.len());
+        }
+    }
+    if y == inner.y + 1 {
         frame.render_widget(
             Line::styled(app.lang.text("empty_log"), Style::new().fg(DIM)),
             Rect::new(inner.x, inner.y + 1, inner.width, 1),
         );
     }
-    for (index, entry) in entries.into_iter().enumerate() {
+}
+
+fn draw_log_row(
+    frame: &mut Frame,
+    app: &App,
+    entry: &LogEntry,
+    body: &str,
+    row: Range<usize>,
+    area: Rect,
+) {
+    let mut spans = if !app.log.wrap || row.start == 0 {
         let color = match entry.direction {
             Direction::System => DIM,
             Direction::Rx => MINT,
             Direction::Tx => AMBER,
         };
-        let body = entry.body(app.lang, app.display);
-        let mut spans = vec![
+        vec![
             Span::styled(
                 entry.time.format("%H:%M:%S%.3f").to_string(),
                 Style::new().fg(DIM),
@@ -281,31 +342,32 @@ fn draw_log(frame: &mut Frame, app: &App, area: Rect) {
                 Style::new().fg(color).bold(),
             ),
             Span::raw(" "),
-        ];
-        let visible = pan(&body, app.log.horizontal);
-        let offset = body.len() - visible.len();
-        let hit = app.search_highlight(entry).and_then(|range| {
-            let start = range.start.max(offset);
-            Some((
-                body.get(offset..start)?,
-                body.get(start..range.end)?,
-                body.get(range.end..)?,
-            ))
-        });
-        if let Some((before, matched, after)) = hit {
-            spans.extend([
-                Span::raw(before),
-                Span::styled(matched, FOCUS),
-                Span::raw(after),
-            ]);
-        } else {
-            spans.push(Span::raw(visible));
+        ]
+    } else {
+        vec![Span::raw(" ".repeat(usize::from(LOG_PREFIX_WIDTH)))]
+    };
+    let hit = app.search_highlight(entry).and_then(|range| {
+        let start = range.start.max(row.start);
+        let end = range.end.min(row.end);
+        if start >= end {
+            return None;
         }
-        frame.render_widget(
-            Line::from(spans),
-            Rect::new(inner.x, inner.y + 1 + index as u16, inner.width, 1),
-        );
+        Some((
+            body.get(row.start..start)?,
+            body.get(start..end)?,
+            body.get(end..row.end)?,
+        ))
+    });
+    if let Some((before, matched, after)) = hit {
+        spans.extend([
+            Span::raw(before),
+            Span::styled(matched, FOCUS),
+            Span::raw(after),
+        ]);
+    } else {
+        spans.push(Span::raw(&body[row]));
     }
+    frame.render_widget(Line::from(spans), area);
 }
 
 fn draw_send(frame: &mut Frame, app: &App, area: Rect) {
@@ -398,20 +460,14 @@ fn draw_keys(frame: &mut Frame, app: &App, areas: &Areas) {
     match app.pane {
         Pane::Settings => local.extend([("↑↓", t("select")), ("Enter", t("edit"))]),
         Pane::Log => {
-            local.push(("/", t("search")));
+            local.extend([("/", t("search")), ("W", t("wrap")), ("End", t("latest"))]);
             if app.search_label().is_some() {
-                local.extend([
-                    ("n/N", t("search_jump")),
-                    ("Esc", t("search_clear")),
-                    ("End", t("latest")),
-                ]);
+                local.extend([("n/N", t("search_jump")), ("Esc", t("search_clear"))]);
             } else {
-                local.extend([
-                    ("PgUp/Dn", t("page")),
-                    ("←→", t("pan")),
-                    ("End", t("latest")),
-                    ("H", t("view")),
-                ]);
+                local.extend([("PgUp/Dn", t("page")), ("H", t("view"))]);
+                if !app.log.wrap {
+                    local.push(("←→", t("pan")));
+                }
             }
         }
         Pane::Options => local.extend([("←→", t("select")), ("Enter", t("edit"))]),
@@ -759,15 +815,4 @@ fn truncate(value: &str, width: usize) -> String {
     }
     prefix.push('…');
     prefix
-}
-
-fn pan(value: &str, offset: usize) -> &str {
-    let mut width = 0;
-    for (index, c) in value.char_indices() {
-        if width >= offset {
-            return &value[index..];
-        }
-        width += c.width().unwrap_or(0);
-    }
-    ""
 }

@@ -76,13 +76,16 @@ The app remembers the last successful connection in `$XDG_STATE_HOME/serial-tui/
 | `Tab` / `Shift+Tab` | Move between settings, log, send options, and send input |
 | `PgUp` / `PgDn` · `←` / `→` · `End` | Page through the log, pan across long lines, or return to the latest entry |
 | `H` in the log | Cycle Text, HEX, and HEX + ASCII |
+| `W` in the log | Toggle line wrapping |
 | `/`, `n` / `N` in the log | Find in buffered records and jump to the next or previous match |
 | `←` / `→` and `Enter` in send options | Set text or HEX input, line endings, presets, or repeat interval |
 | `F7` / `F10` | Open built-in presets / choose a repeat interval or stop repeating |
 | `↑` / `↓` · `Enter` · `Ctrl+U` in send input | Recall history, send, or clear the input |
 | `Esc` / `Ctrl+Q` | Dismiss the current dialog / quit |
 
-Pausing keeps the current log view available while the app continues to receive. The live log retains the latest 2,000 records. In the search dialog, press `Tab` to switch between text and HEX and `F3` to search RX only. Search matches within individual records in the current buffer or paused snapshot. Press `Esc` in the log to clear the search or `End` to follow live records.
+The log title counts new records while the view is paused. Press `End` to return to the latest output and clear the count. The live log retains the latest 2,000 records. Lines are single by default. Press `W` to wrap long records while keeping your place in the paused view.
+
+In the search dialog, press `Tab` to switch between text and HEX and `F3` to search RX only. Search matches within individual records in the current buffer or paused snapshot. Press `Esc` in the log to clear the search.
 
 `F7` fills the send input from a built-in preset. To repeat a command, connect to a port, fill the send input, then press `F10` and choose an interval. Press `F10` again or press `Enter` on the repeat option to stop and cancel queued repeat frames.
 

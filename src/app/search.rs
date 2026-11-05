@@ -2,7 +2,10 @@ use std::{cmp::Ordering, ops::Range};
 
 use unicode_width::UnicodeWidthStr;
 
-use super::{Direction, Editor, Format, Language, Log, LogEntry, Mode, decode_hex};
+use super::{
+    Direction, Editor, Format, Language, Log, LogEntry, LogViewport, Mode, decode_hex,
+    log_view::wrapped_anchor,
+};
 
 pub struct SearchInput {
     pub editor: Editor,
@@ -88,7 +91,7 @@ impl LogSearch {
         log: &mut Log,
         mode: Mode,
         lang: Language,
-        height: usize,
+        viewport: LogViewport,
         reverse: bool,
     ) -> bool {
         let entries = log.filtered(mode);
@@ -129,16 +132,25 @@ impl LogSearch {
             Pattern::Text => entry.body(lang, Format::Text)[..range.start].width(),
             Pattern::Hex(_) => range.start * 3,
         };
-        let bottom = (index + height.saturating_sub(1) / 2)
-            .max(height.min(entries.len()).saturating_sub(1))
-            .min(entries.len() - 1);
-        let anchor = entries[bottom].id;
+        let (anchor, byte) = if log.wrap {
+            let start = match self.pattern {
+                Pattern::Text => range.start,
+                Pattern::Hex(_) => range.start * 3,
+            };
+            let body = entry.body(lang, self.format());
+            (entry.id, Some(wrapped_anchor(&body, viewport, start)))
+        } else {
+            let bottom = (index + viewport.height.saturating_sub(1) / 2)
+                .max(viewport.height.min(entries.len()).saturating_sub(1))
+                .min(entries.len() - 1);
+            (entries[bottom].id, None)
+        };
         self.current = Some(Hit {
             id: entry.id,
             range,
         });
         log.horizontal = column.saturating_sub(8);
-        log.pause_at(anchor);
+        log.pause_at_byte(anchor, byte);
         true
     }
 
@@ -198,17 +210,21 @@ mod tests {
         .compile()
         .unwrap();
 
-        assert!(search.jump(&mut log, Mode::Both, Language::En, 2, true));
+        let viewport = LogViewport {
+            height: 2,
+            width: 16,
+        };
+        assert!(search.jump(&mut log, Mode::Both, Language::En, viewport, true));
         assert!(log.is_paused());
         let entries = log.visible(Mode::Both, 2);
         assert_eq!(search.highlight(entries[0], Format::Hex), Some(201..206));
         assert_eq!(search.highlight(entries[1], Format::Hex), None);
         assert!(log.horizontal > 0);
 
-        assert!(search.jump(&mut log, Mode::Both, Language::En, 2, false));
+        assert!(search.jump(&mut log, Mode::Both, Language::En, viewport, false));
         let entries = log.visible(Mode::Both, 2);
         assert_eq!(search.highlight(entries[0], Format::Hex), Some(192..197));
-        assert!(search.jump(&mut log, Mode::Both, Language::En, 2, true));
+        assert!(search.jump(&mut log, Mode::Both, Language::En, viewport, true));
         let entries = log.visible(Mode::Both, 2);
         assert_eq!(search.highlight(entries[0], Format::Hex), Some(201..206));
     }
