@@ -51,6 +51,8 @@ Use `F6` to switch the interface language and `Ctrl+Q` to exit.
 2. After you confirm a port in the picker, the settings highlight moves to **Connect** or **Apply / Reconnect**. Press `Enter` to open the port, or move up to adjust its settings first. If the device is missing from the list, choose **Enter device path…**.
 3. Press `F3` to pick a work mode. In a mode that can send, use `Tab` to reach the send input and `Enter` to transmit.
 
+On the first successful connection, focus moves to the log in Duplex and Receive only modes, or to the send input in Send only mode. Reconnecting or moving focus while the connection opens keeps your current focus.
+
 Run the app on the Linux machine the adapter is plugged into. If access is denied, check the device node with `ls -l /dev/ttyUSB0` and use an account that can open it. Use an 80×24 terminal or larger for more room to read the log.
 
 **Refresh ports** lists USB adapters and onboard UARTs using Linux device information. Each device appears once, preferring a stable `by-id` or `by-path` link when one exists. In the port picker, use `PgUp` / `PgDn` to page through the list and `F5` to refresh it in place. The selected device stays highlighted if it is still present. Choose **Connect** to check that the device can be opened.

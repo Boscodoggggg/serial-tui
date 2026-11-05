@@ -745,6 +745,13 @@ struct Repeat {
     next: Instant,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FirstOpen {
+    NotYet,
+    FocusOnSuccess,
+    Complete,
+}
+
 pub struct App {
     worker: Worker,
     settings_path: Option<PathBuf>,
@@ -753,6 +760,7 @@ pub struct App {
     pub draft: Settings,
     pub active: Option<Settings>,
     pub pending: bool,
+    first_open: FirstOpen,
     pub mode: Mode,
     pub pane: Pane,
     pub setting: usize,
@@ -798,6 +806,7 @@ impl App {
             draft,
             active: None,
             pending: false,
+            first_open: FirstOpen::NotYet,
             mode: Mode::Both,
             pane: Pane::Settings,
             setting: 0,
@@ -894,6 +903,9 @@ impl App {
         self.stop_repeat();
         self.worker.invalidate_writes();
         self.pending = self.enqueue(Command::Open(self.draft.clone()));
+        if self.pending && self.first_open == FirstOpen::NotYet {
+            self.first_open = FirstOpen::FocusOnSuccess;
+        }
     }
 
     fn select_port(&mut self, path: &str) {
@@ -1519,6 +1531,11 @@ impl App {
                 },
             },
         }
+        if self.first_open == FirstOpen::FocusOnSuccess
+            && (self.pane != Pane::Settings || self.setting != CONNECT_ROW || self.modal.is_some())
+        {
+            self.first_open = FirstOpen::NotYet;
+        }
         false
     }
 
@@ -1652,6 +1669,13 @@ impl App {
                 self.ports = ports;
             }
             Event::Opened(settings) => {
+                if self.first_open == FirstOpen::FocusOnSuccess {
+                    self.pane = match self.mode {
+                        Mode::Both | Mode::Rx => Pane::Log,
+                        Mode::Tx => Pane::Input,
+                    };
+                }
+                self.first_open = FirstOpen::Complete;
                 self.record_system("opened", settings.summary());
                 self.pending = false;
                 self.notice = None;
@@ -1675,6 +1699,9 @@ impl App {
                 restore_error,
             } => {
                 self.pending = false;
+                if self.first_open == FirstOpen::FocusOnSuccess {
+                    self.first_open = FirstOpen::NotYet;
+                }
                 let key = self.record_port_failure(&error, "open_failed");
                 if let Some(settings) = &retained {
                     self.record_system("connection_kept", settings.summary());
@@ -1729,6 +1756,44 @@ fn index_of<T: PartialEq>(values: &[T], selected: &T) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn first_connection_focus_respects_work_mode_and_manual_navigation() {
+        let new_app = |mode| {
+            let mut app =
+                App::new(Language::En, Some("/dev/serial-tui-test".into()), None).unwrap();
+            app.settings_path = None;
+            app.mode = mode;
+            app.setting = CONNECT_ROW;
+            app
+        };
+        let press = |app: &mut App, key| {
+            app.key(KeyEvent::new(key, KeyModifiers::NONE), 10, 8);
+        };
+
+        for (mode, pane) in [
+            (Mode::Both, Pane::Log),
+            (Mode::Rx, Pane::Log),
+            (Mode::Tx, Pane::Input),
+        ] {
+            let mut app = new_app(mode);
+            press(&mut app, KeyCode::Enter);
+            app.serial_event(Event::Opened(app.draft.clone()));
+            assert!(app.pane == pane, "first open in {}", mode.label());
+
+            press(&mut app, KeyCode::F(2));
+            press(&mut app, KeyCode::Enter);
+            app.serial_event(Event::Opened(app.draft.clone()));
+            assert!(app.pane == Pane::Settings, "reconnect in {}", mode.label());
+        }
+
+        let mut app = new_app(Mode::Both);
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Tab);
+        press(&mut app, KeyCode::F(2));
+        app.serial_event(Event::Opened(app.draft.clone()));
+        assert!(app.pane == Pane::Settings);
+    }
 
     #[test]
     fn port_popup_pages_and_keeps_the_selected_device_when_refresh_changes_its_path() {
