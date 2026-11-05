@@ -118,7 +118,10 @@ pub fn draw(frame: &mut Frame, app: &App) {
 
 fn draw_header(frame: &mut Frame, app: &App, areas: &Areas) {
     let t = |key| app.lang.text(key);
-    let title = format!(" {}", t("title"));
+    let title = app.capture_label().map_or_else(
+        || format!(" {}", t("title")),
+        |label| format!(" {}  {label}", t("title")),
+    );
     let status = if app.pending {
         t("pending").into()
     } else if let Some(active) = &app.active {
@@ -382,12 +385,40 @@ fn draw_keys(frame: &mut Frame, app: &App, areas: &Areas) {
         ]),
     }
     frame.render_widget(key_line(local, BACKGROUND), areas.help);
+    let compact = areas.footer.width < 84;
     let global = vec![
-        ("F2", app.lang.pick("Ports", "串口设置")),
-        ("F3", app.lang.pick("Mode", "切换模式")),
-        ("F4", app.lang.pick("Pause", "暂停/跟随")),
+        (
+            "F2",
+            app.lang
+                .pick("Ports", if compact { "串口" } else { "串口设置" }),
+        ),
+        (
+            "F3",
+            app.lang
+                .pick("Mode", if compact { "模式" } else { "切换模式" }),
+        ),
+        (
+            "F4",
+            app.lang.pick(
+                if compact { "Hold" } else { "Pause" },
+                if compact { "暂停" } else { "暂停/跟随" },
+            ),
+        ),
         ("F6", "中/EN"),
-        ("F8", app.lang.pick("Export", "导出日志")),
+        (
+            "F8",
+            app.lang.pick(
+                if compact { "Save" } else { "Export" },
+                if compact { "导出" } else { "导出日志" },
+            ),
+        ),
+        (
+            "F9",
+            app.lang.pick(
+                if compact { "Rec" } else { "Record" },
+                if compact { "录制" } else { "连续录制" },
+            ),
+        ),
         ("^Q", t("quit")),
     ];
     frame.render_widget(key_line(global, BAR), areas.footer);

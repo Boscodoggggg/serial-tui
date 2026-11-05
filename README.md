@@ -53,6 +53,8 @@ Use `F6` to switch the interface language and `Ctrl+Q` to exit.
 
 Run the app on the Linux machine the adapter is plugged into. If access is denied, check the device node with `ls -l /dev/ttyUSB0` and use an account that can open it. Use an 80×24 terminal or larger for more room to read the log.
 
+The app remembers the last successful connection in `$XDG_STATE_HOME/serial-tui/last-connection.json` (default: `~/.local/state/serial-tui/last-connection.json`). `--port` and `--baud` override the saved values for that launch. Select **Connect** to open the device. If applying new settings fails, the app keeps the previous connection or attempts to reopen it with its previous settings.
+
 | Mode | Behavior |
 | --- | --- |
 | **Duplex** | Send commands and inspect replies in one timeline. |
@@ -66,6 +68,7 @@ Run the app on the Linux machine the adapter is plugged into. If access is denie
 | `F2` / `F3` | Focus serial settings / cycle work modes |
 | `F4` / `F6` | Pause or resume log following / switch English and Chinese |
 | `F8` | Export retained records to a new file, with RX and TX bytes in HEX |
+| `F9` | Start or stop recording new serial traffic to a file |
 | `Tab` / `Shift+Tab` | Move between settings, log, send options, and send input |
 | `PgUp` / `PgDn` · `←` / `→` · `End` | Page through the log, pan across long lines, or return to the latest entry |
 | `H` in the log | Cycle Text, HEX, and HEX + ASCII |
@@ -74,6 +77,8 @@ Run the app on the Linux machine the adapter is plugged into. If access is denie
 | `Esc` / `Ctrl+Q` | Dismiss the current dialog / quit |
 
 Pausing keeps the current log view available while the app continues to receive. The live log retains the latest 2,000 records. Press `Enter` on the active repeat option to stop repeating and cancel queued repeat frames.
+
+For long sessions, press `F9`, enter a new filename, and confirm. The file records timestamps, direction, and HEX bytes while the view is paused or the on-screen log rolls over. Recording follows the selected work mode. Use **Duplex** to capture both directions. Press `F9` again to finish and flush the file.
 
 ## License
 

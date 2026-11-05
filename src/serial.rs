@@ -9,9 +9,10 @@ use std::{
     time::Duration,
 };
 
+use serde::{Deserialize, Serialize};
 use serialport::{DataBits, FlowControl, Parity, SerialPort, StopBits};
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Settings {
     pub port: String,
     pub baud: u32,
@@ -87,7 +88,11 @@ pub enum Event {
     Ports(Vec<String>),
     Opened(Settings),
     Closed,
-    OpenFailed(String),
+    OpenFailed {
+        error: String,
+        retained: Option<Settings>,
+        restore_error: Option<String>,
+    },
     ScanFailed(String),
     WriteFailed(String),
     Lost(String),
@@ -164,12 +169,16 @@ impl Worker {
     pub fn discard_rx(&self, discard: bool) {
         self.control.discard_rx.store(discard, SeqCst);
     }
+
+    pub fn stop(&self) {
+        self.control.stop.store(true, SeqCst);
+        self.invalidate_writes();
+    }
 }
 
 impl Drop for Worker {
     fn drop(&mut self) {
-        self.control.stop.store(true, SeqCst);
-        self.invalidate_writes();
+        self.stop();
         // A worker waiting for log queue space must be able to exit before join.
         drop(self.events.take());
         if let Some(thread) = self.thread.take() {
@@ -186,6 +195,59 @@ fn open(settings: &Settings) -> serialport::Result<Box<dyn SerialPort>> {
         .flow_control(settings.flow)
         .timeout(Duration::from_millis(15))
         .open()
+}
+
+struct Connection {
+    port: Box<dyn SerialPort>,
+    settings: Settings,
+}
+
+fn same_device(left: &str, right: &str) -> bool {
+    left == right
+        || std::fs::canonicalize(left)
+            .ok()
+            .zip(std::fs::canonicalize(right).ok())
+            .is_some_and(|(left, right)| left == right)
+}
+
+fn change_connection(connection: &mut Option<Connection>, settings: Settings) -> Event {
+    // Exclusive opens prevent opening the same device twice, even through a symlink.
+    let same = connection
+        .as_ref()
+        .is_some_and(|current| same_device(&current.settings.port, &settings.port));
+    let rollback = if same {
+        connection.take().map(|previous| previous.settings)
+    } else {
+        None
+    };
+    match open(&settings) {
+        Ok(port) => {
+            *connection = Some(Connection {
+                port,
+                settings: settings.clone(),
+            });
+            Event::Opened(settings)
+        }
+        Err(error) => {
+            let mut restore_error = None;
+            if let Some(previous) = rollback {
+                match open(&previous) {
+                    Ok(port) => {
+                        *connection = Some(Connection {
+                            port,
+                            settings: previous,
+                        });
+                    }
+                    Err(error) => restore_error = Some(error.to_string()),
+                }
+            }
+            Event::OpenFailed {
+                error: error.to_string(),
+                retained: connection.as_ref().map(|current| current.settings.clone()),
+                restore_error,
+            }
+        }
+    }
 }
 
 fn scan() -> serialport::Result<Vec<String>> {
@@ -210,10 +272,10 @@ fn run(
     events: SyncSender<Event>,
     control: &Control,
 ) -> Result<(), mpsc::SendError<Event>> {
-    let mut port = None;
+    let mut connection = None;
     let mut buf = [0; 4096];
     while !control.stop.load(SeqCst) {
-        let command = if port.is_some() {
+        let command = if connection.is_some() {
             commands.try_recv().ok()
         } else {
             commands.recv_timeout(Duration::from_millis(15)).ok()
@@ -224,17 +286,10 @@ fn run(
                 Err(error) => events.send(Event::ScanFailed(error.to_string()))?,
             },
             Some(Command::Open(settings)) => {
-                drop(port.take());
-                match open(&settings) {
-                    Ok(endpoint) => {
-                        port = Some(endpoint);
-                        events.send(Event::Opened(settings))?;
-                    }
-                    Err(error) => events.send(Event::OpenFailed(error.to_string()))?,
-                }
+                events.send(change_connection(&mut connection, settings))?;
             }
             Some(Command::Close) => {
-                drop(port.take());
+                drop(connection.take());
                 events.send(Event::Closed)?;
             }
             Some(Command::Write {
@@ -242,9 +297,9 @@ fn run(
                 session_epoch,
                 repeat_epoch,
             }) => {
-                if let Some(endpoint) = &mut port {
+                if let Some(current) = &mut connection {
                     let (count, error) = write_packet(
-                        endpoint.as_mut(),
+                        current.port.as_mut(),
                         &data,
                         session_epoch,
                         repeat_epoch,
@@ -260,7 +315,7 @@ fn run(
                         ) {
                             events.send(Event::WriteFailed(error.to_string()))?;
                         } else {
-                            drop(port.take());
+                            drop(connection.take());
                             events.send(Event::Lost(error.to_string()))?;
                         }
                     }
@@ -268,10 +323,10 @@ fn run(
             }
             _ => {}
         }
-        if let Some(endpoint) = &mut port {
-            match endpoint.read(&mut buf) {
+        if let Some(current) = &mut connection {
+            match current.port.read(&mut buf) {
                 Ok(0) => {
-                    drop(port.take());
+                    drop(connection.take());
                     events.send(Event::Lost("end of stream".into()))?;
                 }
                 Ok(size) if !control.discard_rx.load(SeqCst) => {
@@ -286,7 +341,7 @@ fn run(
                             | io::ErrorKind::Interrupted
                     ) => {}
                 Err(error) => {
-                    drop(port.take());
+                    drop(connection.take());
                     events.send(Event::Lost(error.to_string()))?;
                 }
             }

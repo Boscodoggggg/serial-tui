@@ -3,6 +3,7 @@ use std::{
     fmt::Write as _,
     fs::OpenOptions,
     io::{BufWriter, Write},
+    path::PathBuf,
     sync::mpsc::TryRecvError,
     time::{Duration, Instant},
 };
@@ -11,7 +12,11 @@ use chrono::{DateTime, Local};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serialport::{DataBits, FlowControl, Parity, StopBits};
 
-use crate::serial::{Command, Event, Settings, Worker, data_bits_number, stop_bits_number};
+use crate::{
+    capture::Capture,
+    serial::{Command, Event, Settings, Worker, data_bits_number, stop_bits_number},
+    settings_store,
+};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Language {
@@ -75,6 +80,10 @@ impl Language {
             "closed" => ("Port closed", "已断开串口"),
             "lost" => ("Port lost", "串口连接丢失"),
             "open_failed" => ("Could not open port", "无法打开串口"),
+            "connection_kept" => ("Previous connection available", "原连接仍可用"),
+            "restore_failed" => ("Could not restore previous connection", "无法恢复原连接"),
+            "settings_load_failed" => ("Could not load saved settings", "无法读取上次的串口参数"),
+            "settings_save_failed" => ("Could not save settings", "无法保存串口参数"),
             "scan_failed" => ("Could not list ports", "无法枚举串口"),
             "found" => ("Ports found", "发现串口数"),
             "write_failed" => ("Write timed out", "串口写入超时"),
@@ -90,6 +99,14 @@ impl Language {
             "export_path" => ("Export log to a new file", "将日志导出到新文件"),
             "saved" => ("Log exported", "已导出日志"),
             "save_failed" => ("Export failed", "日志导出失败"),
+            "capture_path" => ("Record traffic to a new file", "连续记录到新文件"),
+            "capture_started" => ("Recording started", "已开始连续录制"),
+            "capture_saved" => ("Recording saved", "已保存录制日志"),
+            "capture_failed" => ("Recording failed", "日志录制失败"),
+            "capture_overflow" => (
+                "Recording stopped: disk writer fell behind",
+                "写入跟不上，已停止录制",
+            ),
             "switch" => ("Switch pane", "切区"),
             "select" => ("Select", "选择"),
             "edit" => ("Edit", "编辑"),
@@ -329,12 +346,7 @@ pub struct LogEntry {
 impl LogEntry {
     pub fn body(&self, lang: Language, display: Format) -> String {
         if let Some((key, detail)) = &self.message {
-            let title = lang.text(key);
-            return clean_text(if detail.is_empty() {
-                title.into()
-            } else {
-                format!("{title} · {detail}")
-            });
+            return system_text(lang, key, detail);
         }
         match display {
             Format::Text => {
@@ -358,6 +370,19 @@ impl LogEntry {
             }
         }
     }
+}
+
+fn system_text(lang: Language, key: &str, detail: &str) -> String {
+    let title = lang.text(key);
+    clean_text(if detail.is_empty() {
+        title.into()
+    } else {
+        format!("{title} · {detail}")
+    })
+}
+
+fn log_line(time: &DateTime<Local>, direction: Direction, body: &str) -> String {
+    format!("{}\t{}\t{body}\n", time.to_rfc3339(), direction.label())
 }
 
 pub fn clean_text(value: String) -> String {
@@ -529,12 +554,8 @@ impl Log {
         let file = OpenOptions::new().write(true).create_new(true).open(path)?;
         let mut writer = BufWriter::new(file);
         for entry in &self.entries {
-            writeln!(
-                writer,
-                "{}\t{}\t{}",
-                entry.time.to_rfc3339(),
-                entry.direction.label(),
-                entry.body(lang, Format::Hex)
+            writer.write_all(
+                log_line(&entry.time, entry.direction, &entry.body(lang, Format::Hex)).as_bytes(),
             )?;
         }
         writer.flush()
@@ -572,6 +593,7 @@ pub enum EditField {
     Port,
     Baud,
     Export,
+    Capture,
 }
 
 pub struct Menu {
@@ -597,6 +619,7 @@ impl EditField {
             Self::Port => "manual_port",
             Self::Baud => "custom_baud",
             Self::Export => "export_path",
+            Self::Capture => "capture_path",
         }
     }
 }
@@ -609,6 +632,8 @@ struct Repeat {
 
 pub struct App {
     worker: Worker,
+    settings_path: Option<PathBuf>,
+    capture: Option<Capture>,
     pub lang: Language,
     pub draft: Settings,
     pub active: Option<Settings>,
@@ -632,9 +657,26 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(lang: Language, draft: Settings) -> std::io::Result<Self> {
+    pub fn new(lang: Language, port: Option<String>, baud: Option<u32>) -> std::io::Result<Self> {
+        let settings_path = settings_store::path();
+        let (mut draft, load_error) = match settings_path
+            .as_deref()
+            .map(settings_store::load)
+            .transpose()
+        {
+            Ok(settings) => (settings.unwrap_or_default(), None),
+            Err(error) => (Settings::default(), Some(error.to_string())),
+        };
+        if let Some(port) = port {
+            draft.port = port;
+        }
+        if let Some(baud) = baud {
+            draft.baud = baud;
+        }
         let mut app = Self {
             worker: Worker::start()?,
+            settings_path,
+            capture: None,
             lang,
             draft,
             active: None,
@@ -656,6 +698,10 @@ impl App {
             before_history: None,
             repeat: None,
         };
+        if let Some(error) = load_error {
+            app.record_system("settings_load_failed", error.clone());
+            app.notice("settings_load_failed", error);
+        }
         app.enqueue(Command::Scan);
         Ok(app)
     }
@@ -961,6 +1007,9 @@ impl App {
                     EditField::Export => {
                         Local::now().format("serial-%Y%m%d-%H%M%S.log").to_string()
                     }
+                    EditField::Capture => Local::now()
+                        .format("serial-capture-%Y%m%d-%H%M%S.log")
+                        .to_string(),
                 };
                 self.modal = Some(Modal::Edit(field, Editor::new(initial)));
             }
@@ -988,6 +1037,14 @@ impl App {
                     None
                 }
                 Err(error) => Some(("save_failed", error.to_string())),
+            },
+            EditField::Capture => match Capture::start(PathBuf::from(value)) {
+                Ok(capture) => {
+                    self.capture = Some(capture);
+                    self.notice("capture_started", value.into());
+                    None
+                }
+                Err(error) => Some(("capture_failed", error.to_string())),
             },
         };
         if let Some((key, detail)) = problem {
@@ -1161,6 +1218,13 @@ impl App {
                 }
             }
             KeyCode::F(8) => self.apply(Value::Edit(EditField::Export)),
+            KeyCode::F(9) => {
+                if let Some(capture) = &mut self.capture {
+                    capture.stop();
+                } else {
+                    self.apply(Value::Edit(EditField::Capture));
+                }
+            }
             KeyCode::Tab => self.switch_pane(event.modifiers.contains(KeyModifiers::SHIFT)),
             KeyCode::BackTab => self.switch_pane(true),
             key => match self.pane {
@@ -1248,7 +1312,78 @@ impl App {
                 changed = true;
             }
         }
+        if let Some(capture) = self.capture.take_if(|capture| capture.is_finished()) {
+            let (path, result) = capture.finish();
+            let path = path.display().to_string();
+            let (key, detail) = match result {
+                Ok(false) => ("capture_saved", path),
+                Ok(true) => ("capture_overflow", path),
+                Err(error) => ("capture_failed", format!("{path} · {error}")),
+            };
+            self.record_system(key, detail.clone());
+            self.notice(key, detail);
+            changed = true;
+        }
         changed
+    }
+
+    pub fn capture_label(&self) -> Option<&str> {
+        self.capture.as_ref().map(|capture| {
+            if capture.is_recording() {
+                self.lang.pick("● REC", "● 录制中")
+            } else {
+                self.lang.pick("Saving…", "保存中…")
+            }
+        })
+    }
+
+    pub fn finish_capture_on_exit(mut self) -> std::io::Result<()> {
+        if self.capture.is_some() {
+            self.worker.stop();
+            if let Some(events) = self.worker.events.take() {
+                for event in events {
+                    self.serial_event(event);
+                }
+            }
+        }
+        if let Some(capture) = self.capture.take() {
+            let (path, result) = capture.finish();
+            let label = match result {
+                Ok(false) => return Ok(()),
+                Ok(true) => self.lang.text("capture_overflow").to_owned(),
+                Err(error) => format!("{} · {error}", self.lang.text("capture_failed")),
+            };
+            return Err(std::io::Error::other(format!(
+                "{label} · {}",
+                path.display()
+            )));
+        }
+        Ok(())
+    }
+
+    fn record_system(&mut self, key: &'static str, detail: String) {
+        if let Some(capture) = self
+            .capture
+            .as_mut()
+            .filter(|capture| capture.is_recording())
+        {
+            capture.push(log_line(
+                &Local::now(),
+                Direction::System,
+                &system_text(self.lang, key, &detail),
+            ));
+        }
+        self.log.system(key, detail);
+    }
+
+    fn capture_bytes(&mut self, direction: Direction, bytes: &[u8]) {
+        if let Some(capture) = self
+            .capture
+            .as_mut()
+            .filter(|capture| capture.is_recording())
+        {
+            capture.push(log_line(&Local::now(), direction, &hex(bytes)));
+        }
     }
 
     fn serial_event(&mut self, event: Event) {
@@ -1258,36 +1393,61 @@ impl App {
                 self.ports = ports;
             }
             Event::Opened(settings) => {
-                self.log.system("opened", settings.summary());
-                self.active = Some(settings);
+                self.record_system("opened", settings.summary());
                 self.pending = false;
                 self.notice = None;
+                if let Some(path) = &self.settings_path
+                    && let Err(error) = settings_store::save(path, &settings)
+                {
+                    let detail = error.to_string();
+                    self.record_system("settings_save_failed", detail.clone());
+                    self.notice("settings_save_failed", detail);
+                }
+                self.active = Some(settings);
             }
             Event::Closed => {
-                self.log.system("closed", String::new());
+                self.record_system("closed", String::new());
                 self.active = None;
                 self.pending = false;
             }
-            Event::OpenFailed(error) => {
-                self.active = None;
+            Event::OpenFailed {
+                error,
+                retained,
+                restore_error,
+            } => {
                 self.pending = false;
-                self.log.system("open_failed", error.clone());
-                self.notice("open_failed", error);
+                self.record_system("open_failed", error.clone());
+                if let Some(settings) = &retained {
+                    self.record_system("connection_kept", settings.summary());
+                    self.notice("connection_kept", error);
+                } else if let Some(restore_error) = restore_error {
+                    self.record_system("restore_failed", restore_error.clone());
+                    self.notice("restore_failed", restore_error);
+                } else {
+                    self.notice("open_failed", error);
+                }
+                self.active = retained;
             }
             Event::Lost(error) => {
                 self.active = None;
                 self.stop_repeat();
-                self.log.system("lost", error.clone());
+                self.record_system("lost", error.clone());
                 self.notice("lost", error);
             }
             Event::ScanFailed(error) => self.notice("scan_failed", error),
             Event::WriteFailed(error) => {
                 self.stop_repeat();
-                self.log.system("write_failed", error.clone());
+                self.record_system("write_failed", error.clone());
                 self.notice("write_failed", error);
             }
-            Event::Rx(bytes) => self.log.receive(&bytes),
-            Event::Tx(bytes) => self.log.sent(bytes),
+            Event::Rx(bytes) => {
+                self.capture_bytes(Direction::Rx, &bytes);
+                self.log.receive(&bytes);
+            }
+            Event::Tx(bytes) => {
+                self.capture_bytes(Direction::Tx, &bytes);
+                self.log.sent(bytes);
+            }
         }
     }
 }

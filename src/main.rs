@@ -1,5 +1,7 @@
 mod app;
+mod capture;
 mod serial;
+mod settings_store;
 mod ui;
 
 use std::{
@@ -14,21 +16,19 @@ use crossterm::{
 };
 use ratatui::DefaultTerminal;
 
-use crate::{
-    app::{App, Language},
-    serial::Settings,
-};
+use crate::app::{App, Language};
 
 const USAGE: &str = "Usage: serial-tui [--port PATH] [--baud RATE] [--lang en|zh]
 
   --port PATH  Preselect a device path (connect inside the TUI)
-  --baud RATE  Preselect a baud rate (default: 115200)
+  --baud RATE  Override the saved baud rate (initial default: 115200)
   --lang       Override the terminal locale
   -h, --help   Show this help
   -V, --version  Print the version";
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut settings = Settings::default();
+    let mut port = None;
+    let mut baud = None;
     let mut lang = ["LC_ALL", "LC_MESSAGES", "LANG"]
         .into_iter()
         .find_map(|key| env::var(key).ok().filter(|value| !value.is_empty()))
@@ -46,17 +46,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 return Ok(());
             }
             "--port" => {
-                settings.port = args
-                    .next()
-                    .filter(|port| !port.is_empty())
-                    .ok_or("--port requires a device path")?
+                port = Some(
+                    args.next()
+                        .filter(|port| !port.is_empty())
+                        .ok_or("--port requires a device path")?,
+                );
             }
             "--baud" => {
-                settings.baud = args
-                    .next()
-                    .and_then(|value| value.parse().ok())
-                    .filter(|rate| *rate > 0)
-                    .ok_or("--baud requires a positive integer")?
+                baud = Some(
+                    args.next()
+                        .and_then(|value| value.parse().ok())
+                        .filter(|rate| *rate > 0)
+                        .ok_or("--baud requires a positive integer")?,
+                );
             }
             "--lang" => {
                 lang = match args.next().as_deref() {
@@ -71,11 +73,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
         return Err("serial-tui requires an interactive terminal".into());
     }
-    let mut app = App::new(lang, settings)?;
-    let _restore = RestoreTerminal;
-    let mut terminal = ratatui::try_init()?;
-    execute!(io::stdout(), EnableBracketedPaste)?;
-    run(&mut terminal, &mut app)?;
+    let mut app = App::new(lang, port, baud)?;
+    let result = {
+        let _restore = RestoreTerminal;
+        let mut terminal = ratatui::try_init()?;
+        execute!(io::stdout(), EnableBracketedPaste)?;
+        run(&mut terminal, &mut app)
+    };
+    let capture_result = app.finish_capture_on_exit();
+    result?;
+    capture_result?;
     Ok(())
 }
 
