@@ -3,23 +3,30 @@
 </h1>
 
 <p align="center">
-  <strong>A keyboard-only serial workbench for Linux terminals</strong><br>
-  Configure a port, send text or HEX, and inspect the reply on the same screen.
+  <strong>Debug USB serial adapters and onboard UARTs from a Linux terminal</strong><br>
+  Send and receive text or HEX, search device output, and record serial traffic.
 </p>
 
 <p align="center">
-  <kbd>🐧 Linux · x86_64 / ARM64 / ARMv7</kbd> &nbsp; <kbd>⌨️ Keyboard only</kbd> &nbsp; <kbd>🌐 English / 中文</kbd> &nbsp; <a href="LICENSE"><kbd>MIT</kbd></a>
+  <kbd>🐧 Linux</kbd> &nbsp; <kbd>⌨️ Keyboard only</kbd> &nbsp; <kbd>🌐 English / 中文</kbd> &nbsp; <a href="LICENSE"><kbd>MIT</kbd></a>
 </p>
 
 <p align="center">
-  <a href="#quick-start">⬇️ Quick start</a> · <a href="#connect-a-device">🔌 Connect a device</a> · <a href="#keyboard-reference">⌨️ Keys</a> · <a href="README.zh-CN.md">简体中文</a>
+  <strong>⬇️ Download a Linux executable</strong> ·
+  <a href="https://github.com/Boscodoggggg/serial-tui/releases/latest/download/serial-tui-linux-x86_64">x86_64</a> ·
+  <a href="https://github.com/Boscodoggggg/serial-tui/releases/latest/download/serial-tui-linux-aarch64">ARM64</a> ·
+  <a href="https://github.com/Boscodoggggg/serial-tui/releases/latest/download/serial-tui-linux-armv7">ARMv7</a>
+</p>
+
+<p align="center">
+  <a href="#quick-start">▶️ Quick start</a> · <a href="#connect-a-device">🔌 Connect a device</a> · <a href="#keyboard-reference">⌨️ Keys</a> · <a href="README.zh-CN.md">简体中文</a>
 </p>
 
 ## Terminal walkthrough
 
-![English Serial TUI walkthrough showing baud rate selection and the Duplex, Receive only, and Send only modes.](docs/assets/terminal-en.gif)
+![English Serial TUI demo showing a serial connection, incoming logs, the paused log counter, line wrapping, and a command reply.](docs/assets/terminal-en.gif)
 
-Recorded from the Linux release binary. The walkthrough covers serial settings and mode switching before a device is connected.
+Recorded with the v0.1.6 Linux binary connected to a virtual serial port that simulates a board console. Press `F4` to pause, `W` to wrap long lines, and `End` to jump to the latest output.
 
 ## Quick start
 

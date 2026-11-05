@@ -3,23 +3,30 @@
 </h1>
 
 <p align="center">
-  <strong>Linux 终端里的纯键盘串口调测台</strong><br>
-  选串口、发文本或 HEX、看设备回包，一屏完成。
+  <strong>在 Linux 终端调试 USB 转串口和板载 UART</strong><br>
+  支持文本和 HEX 收发、日志搜索与收发数据录制。
 </p>
 
 <p align="center">
-  <kbd>🐧 Linux · x86_64 / ARM64 / ARMv7</kbd> &nbsp; <kbd>⌨️ 纯键盘</kbd> &nbsp; <kbd>🌐 中文 / English</kbd> &nbsp; <a href="LICENSE"><kbd>MIT</kbd></a>
+  <kbd>🐧 Linux</kbd> &nbsp; <kbd>⌨️ 纯键盘</kbd> &nbsp; <kbd>🌐 中文 / English</kbd> &nbsp; <a href="LICENSE"><kbd>MIT</kbd></a>
 </p>
 
 <p align="center">
-  <a href="#快速开始">⬇️ 快速开始</a> · <a href="#连接设备">🔌 连接设备</a> · <a href="#快捷键">⌨️ 快捷键</a> · <a href="README.md">English</a>
+  <strong>⬇️ 下载 Linux 可执行文件</strong> ·
+  <a href="https://github.com/Boscodoggggg/serial-tui/releases/latest/download/serial-tui-linux-x86_64">x86_64</a> ·
+  <a href="https://github.com/Boscodoggggg/serial-tui/releases/latest/download/serial-tui-linux-aarch64">ARM64</a> ·
+  <a href="https://github.com/Boscodoggggg/serial-tui/releases/latest/download/serial-tui-linux-armv7">ARMv7</a>
+</p>
+
+<p align="center">
+  <a href="#快速开始">▶️ 快速开始</a> · <a href="#连接设备">🔌 连接设备</a> · <a href="#快捷键">⌨️ 快捷键</a> · <a href="README.md">English</a>
 </p>
 
 ## 终端实录
 
-![中文串口调测台实录，展示波特率选择和收发、仅接收、仅发送三种模式。](docs/assets/terminal-zh.gif)
+![中文串口调测实录，展示连接串口、接收日志、暂停计数、自动换行和发送指令后收到回包。](docs/assets/terminal-zh.gif)
 
-画面录自 Linux 发布版，演示连接设备前的串口设置和模式切换。
+画面由 v0.1.6 Linux 发布版录制，使用虚拟串口模拟板卡控制台。按 `F4` 暂停跟随，按 `W` 展开长行，按 `End` 回到最新日志。
 
 ## 快速开始
 
