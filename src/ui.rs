@@ -11,8 +11,8 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
     app::{
-        App, Direction, Editor, Language, LogEntry, LogViewport, Modal, Mode, Pane, PortMenu,
-        clean_text, pan_byte,
+        App, Direction, Editor, Format, Language, LogEntry, LogViewport, Modal, Mode, Pane,
+        PortMenu, clean_text, pan_byte,
     },
     serial::{PortKind, same_device},
 };
@@ -83,7 +83,7 @@ impl Areas {
 pub fn log_viewport(area: Rect, mode: Mode) -> LogViewport {
     let log = Areas::new(area, mode).map_or(Rect::default(), |areas| areas.log);
     LogViewport {
-        height: usize::from(log.height.saturating_sub(3).max(1)),
+        height: usize::from(log.height.saturating_sub(4).max(1)),
         width: usize::from(log.width.saturating_sub(4 + LOG_PREFIX_WIDTH).max(1)),
     }
 }
@@ -258,33 +258,65 @@ fn draw_log(frame: &mut Frame, app: &App, area: Rect) {
     let block = panel(&title, app.pane == Pane::Log, BACKGROUND);
     let inner = block.inner(area);
     frame.render_widget(block, area);
+    let mut formats = vec![Span::styled(
+        format!("{} ", app.lang.text("view")),
+        Style::new().fg(DIM),
+    )];
+    for (format, label) in [
+        (Format::Text, app.lang.text("text")),
+        (Format::Hex, "HEX"),
+        (Format::Both, "HEX+ASCII"),
+    ] {
+        let selected = app.display == format;
+        formats.push(Span::styled(
+            if selected {
+                format!("[{label}]")
+            } else {
+                label.into()
+            },
+            if selected {
+                FOCUS
+            } else {
+                Style::new().fg(DIM)
+            },
+        ));
+        formats.push(Span::raw(" "));
+    }
+    formats.extend([
+        Span::styled(" H", Style::new().fg(MINT).bold()),
+        Span::styled(format!(" {}", app.lang.text("cycle")), Style::new().fg(DIM)),
+    ]);
+    frame.render_widget(
+        Line::from(formats),
+        Rect::new(inner.x, inner.y, inner.width, 1),
+    );
     let counters = format!("RX {} B / TX {} B", app.log.rx, app.log.tx);
-    let [format_area, count_area] = Layout::horizontal([
+    let [status_area, count_area] = Layout::horizontal([
         Constraint::Min(1),
         Constraint::Length(counters.len() as u16),
     ])
-    .areas(Rect::new(inner.x, inner.y, inner.width, 1));
-    let mut format = app.lang.text(app.display.label()).to_owned();
+    .areas(Rect::new(inner.x, inner.y + 1, inner.width, 1));
+    let mut status = Vec::new();
     if app.log.wrap {
-        format.push_str(" · ");
-        format.push_str(app.lang.text("wrap"));
+        status.push(app.lang.text("wrap").to_owned());
     }
     if !app.log.is_paused() {
-        format.push_str(" · ");
-        format.push_str(app.lang.text("following"));
+        status.push(app.lang.text("following").to_owned());
     }
     if let Some(search) = app.search_label() {
-        format.push_str(" · ");
-        format.push_str(&search);
+        status.push(search);
     }
-    frame.render_widget(Line::styled(format, Style::new().fg(DIM)), format_area);
+    frame.render_widget(
+        Line::styled(status.join(" · "), Style::new().fg(DIM)),
+        status_area,
+    );
     frame.render_widget(Line::styled(counters, Style::new().fg(DIM)), count_area);
 
     let viewport = LogViewport {
-        height: usize::from(inner.height.saturating_sub(1)),
+        height: usize::from(inner.height.saturating_sub(2)),
         width: usize::from(inner.width.saturating_sub(LOG_PREFIX_WIDTH).max(1)),
     };
-    let mut y = inner.y + 1;
+    let mut y = inner.y + 2;
     let mut draw_row = |entry: &LogEntry, body: &str, range: Range<usize>| {
         draw_log_row(
             frame,
@@ -309,10 +341,10 @@ fn draw_log(frame: &mut Frame, app: &App, area: Rect) {
             draw_row(entry, &body, offset..body.len());
         }
     }
-    if y == inner.y + 1 {
+    if y == inner.y + 2 {
         frame.render_widget(
             Line::styled(app.lang.text("empty_log"), Style::new().fg(DIM)),
-            Rect::new(inner.x, inner.y + 1, inner.width, 1),
+            Rect::new(inner.x, inner.y + 2, inner.width, 1),
         );
     }
 }

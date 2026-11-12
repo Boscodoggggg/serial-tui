@@ -145,6 +145,7 @@ impl Language {
             "latest" => ("Latest", "最新"),
             "pan" => ("Pan", "横移"),
             "view" => ("View", "显示"),
+            "cycle" => ("Cycle", "切换"),
             "search" => ("Find", "搜索"),
             "search_log" => ("Find in log", "搜索日志"),
             "search_empty" => ("Enter a search term", "请输入搜索内容"),
@@ -1549,6 +1550,22 @@ impl App {
                             Format::Both => Format::Text,
                         };
                         self.log.horizontal = 0;
+                        if let Some(paused) = &self.log.paused {
+                            let (anchor, byte) = self.log.visible(self.mode, 1).last().map_or(
+                                (paused.anchor, None),
+                                |entry| {
+                                    let byte = self.log.wrap.then(|| {
+                                        log_view::wrapped_anchor(
+                                            &entry.body(self.lang, self.display),
+                                            log_viewport,
+                                            0,
+                                        )
+                                    });
+                                    (entry.id, byte)
+                                },
+                            );
+                            self.log.pause_at_byte(anchor, byte);
+                        }
                     }
                     _ => {}
                 },
@@ -1797,6 +1814,123 @@ fn index_of<T: PartialEq>(values: &[T], selected: &T) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn display_shortcut_keeps_the_paused_record_across_formats_and_modes() {
+        let viewport = LogViewport {
+            height: 2,
+            width: 8,
+        };
+        for lang in [Language::En, Language::Zh] {
+            let mut app = App::new(lang, Some("/dev/serial-tui-test".into()), None).unwrap();
+            app.pane = Pane::Log;
+            for mode in [Mode::Both, Mode::Rx, Mode::Tx] {
+                app.mode = mode;
+                for wrap in [false, true] {
+                    app.display = Format::Text;
+                    app.log = Log::default();
+                    app.log
+                        .receive("before\n串口测试 abcdefghijklmnop\n".as_bytes());
+                    app.log.sent(b"AT\x00\xffabcdefghijklmnop\r\n".to_vec());
+                    app.log.wrap = wrap;
+                    app.log.toggle_follow();
+                    app.log.horizontal = 8;
+                    let record = app.log.visible(mode, 1)[0].id;
+                    app.log.pause_at_byte(record, Some(16));
+                    app.log.receive(b"new output\n");
+
+                    for (key, format) in
+                        [('h', Format::Hex), ('H', Format::Both), ('h', Format::Text)]
+                    {
+                        app.key(
+                            KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE),
+                            viewport,
+                            1,
+                        );
+                        assert!(app.display == format);
+                        assert_eq!(app.log.paused.as_ref().unwrap().anchor, record);
+                        assert_eq!(app.log.visible(mode, 1)[0].id, record);
+                        assert_eq!(app.log.horizontal, 0);
+                        assert_eq!(app.log.new_since_pause(), Some(1));
+                        if wrap {
+                            let rows = app.log.wrapped(mode, lang, format, viewport);
+                            assert_eq!(rows.last().unwrap().entry.id, record);
+                            assert_eq!(rows.last().unwrap().rows[0].start, 0);
+                        }
+                    }
+                }
+            }
+
+            app.pane = Pane::Input;
+            app.key(
+                KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE),
+                viewport,
+                1,
+            );
+            assert!(app.display == Format::Text);
+            assert_eq!(app.input.value, "h");
+        }
+    }
+
+    #[test]
+    fn log_format_header_fits_small_terminals_and_keeps_the_shortcut_during_search() {
+        use crate::ui;
+        use ratatui::{Terminal, backend::TestBackend};
+
+        for lang in [Language::En, Language::Zh] {
+            let mut app = App::new(lang, Some("/dev/serial-tui-test".into()), None).unwrap();
+            app.pane = Pane::Log;
+            app.search = Some(
+                SearchInput {
+                    editor: Editor::new("41".into()),
+                    hex: true,
+                    rx_only: false,
+                }
+                .compile()
+                .unwrap(),
+            );
+            for mode in [Mode::Both, Mode::Rx, Mode::Tx] {
+                app.mode = mode;
+                for (width, height) in [(64, 17), (80, 24), (100, 24)] {
+                    let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+                    for (format, label) in [
+                        (Format::Text, lang.text("text")),
+                        (Format::Hex, "HEX"),
+                        (Format::Both, "HEX+ASCII"),
+                    ] {
+                        app.display = format;
+                        terminal.draw(|frame| ui::draw(frame, &app)).unwrap();
+                        let rows: Vec<String> = terminal
+                            .backend()
+                            .buffer()
+                            .content()
+                            .chunks(usize::from(width))
+                            .map(|row| {
+                                row.iter()
+                                    .map(|cell| cell.symbol())
+                                    .collect::<String>()
+                                    .replace(' ', "")
+                            })
+                            .collect();
+                        let header = &rows[4];
+                        for text in [
+                            lang.text("view"),
+                            lang.text("text"),
+                            "HEX",
+                            "HEX+ASCII",
+                            &format!("[{label}]"),
+                            &format!("H{}", lang.text("cycle")),
+                        ] {
+                            assert!(
+                                header.contains(text),
+                                "missing {text} at {width}x{height}: {header}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn first_connection_focus_respects_work_mode_and_manual_navigation() {
